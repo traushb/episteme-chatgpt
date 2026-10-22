@@ -59,16 +59,19 @@ final class CloudKitLibraryTransport {
     /// 400 pages × 500 records = 200k records, far beyond any library.
     private static let maxSnapshotPages = 400
 
-    private let container: CKContainer
-    private let database: CKDatabase
+    private let makeContainer: () -> CKContainer
+    /// Created on first use rather than at launch: `CKContainer.default()`
+    /// raises an exception in builds signed without the iCloud entitlement
+    /// (for example sideloaded with a free Apple ID), and sync is Pro-only.
+    private lazy var container: CKContainer = makeContainer()
+    private lazy var database: CKDatabase = container.privateCloudDatabase
     /// Common tag for this feature: filter Console with
     /// subsystem `com.aryan.reader`, category `CloudKitSync`, or grep the
     /// `cloudkit_sync.` message prefix. Every line carries both.
     private let logger = Logger(subsystem: "com.aryan.reader", category: "CloudKitSync")
 
-    init(container: CKContainer = .default()) {
-        self.container = container
-        self.database = container.privateCloudDatabase
+    init(container: @escaping @autoclosure () -> CKContainer = CKContainer.default()) {
+        self.makeContainer = container
     }
 
     var zoneID: CKRecordZone.ID {

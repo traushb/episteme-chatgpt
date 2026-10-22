@@ -1,0 +1,165 @@
+name: iOS unsigned IPA
+
+# Builds an unsigned Episteme .ipa on a hosted Mac, for sideloading with a
+# re-signing tool (Sideloadly, AltStore, SideStore). The native inputs that
+# are not in the repository are fetched from their upstream sources: PDFium
+# from bblanchon/pdfium-binaries (the build scripts expect that layout), and
+# libarchive/xz from their own repositories.
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Xcode build configuration
+        type: choice
+        options: [Release, Debug]
+        default: Release
+  push:
+    branches:
+      - claude/chatgpt-answer-analysis-ios-evrpz8
+
+concurrency:
+  group: ios-unsigned-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ipa:
+    # Intel runners have 14 GB of RAM (Apple Silicon ones 7 GB); the
+    # Kotlin/Native release link of the shared module needs the headroom.
+    runs-on: macos-15-intel
+    timeout-minutes: 180
+    env:
+      CONFIGURATION: ${{ inputs.configuration || 'Release' }}
+      PDFIUM_TAG: chromium/8066
+      LIBARCHIVE_TAG: v3.8.1
+      XZ_TAG: v5.8.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: |
+          set -euo pipefail
+          XCODE="$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n 1)"
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          # The Gradle native-library tasks pin DEVELOPER_DIR to /Applications/Xcode.app.
+          if [ -L /Applications/Xcode.app ] || [ ! -e /Applications/Xcode.app ]; then
+            sudo ln -sfn "$XCODE" /Applications/Xcode.app
+          fi
+          xcodebuild -version
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Android SDK packages (Gradle Android plugin, CMake for libarchive)
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "cmake;3.31.6"
+          ls "$ANDROID_HOME/cmake"
+
+      - name: Configure Gradle
+        run: |
+          cat >> gradle.properties <<'EOF'
+          kotlin.mpp.applyDefaultHierarchyTemplate=false
+          kotlin.daemon.jvmargs=-Xmx6g -XX:+UseG1GC -Dfile.encoding=UTF-8
+          org.gradle.workers.max=3
+          EOF
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Cache Kotlin/Native toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gradle/libs.versions.toml') }}
+
+      - name: Fetch PDFium, libarchive and xz
+        run: |
+          set -euo pipefail
+          for variant in ios-device-arm64 ios-simulator-arm64; do
+            mkdir -p "third_party/pdfium/$variant"
+            curl -fsSL "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG//\//%2F}/pdfium-$variant.tgz" \
+              | tar -xz -C "third_party/pdfium/$variant"
+            ls "third_party/pdfium/$variant" "third_party/pdfium/$variant/lib"
+          done
+          git clone --quiet --depth 1 --branch "$LIBARCHIVE_TAG" https://github.com/libarchive/libarchive.git third_party/libarchive
+          git clone --quiet --depth 1 --branch "$XZ_TAG" https://github.com/tukaani-project/xz.git third_party/xz
+
+      - name: Build PDFium.xcframework
+        run: |
+          set -euo pipefail
+          # The Xcode validation phase requires the framework plist to state the
+          # binary's own minimum OS, so take it from the downloaded dylib.
+          MINOS="$(otool -l third_party/pdfium/ios-device-arm64/lib/libpdfium.dylib | awk '/minos/ {print $2; exit}')"
+          echo "PDFium minimum iOS: $MINOS"
+          sed -i '' "s/^MINIMUM_OS=.*/MINIMUM_OS=\"$MINOS\"/" scripts/ios/create-pdfium-xcframework.sh
+          sh scripts/ios/create-pdfium-xcframework.sh
+
+      - name: Skip the Crashlytics dSYM upload (no Firebase config here)
+        run: |
+          python3 - <<'EOF'
+          from pathlib import Path
+          project = Path("iosApp/Reader.xcodeproj/project.pbxproj")
+          text = project.read_text()
+          phase = 'shellScript = "\\"${BUILD_DIR%/Build/*}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run\\"\\n";'
+          assert phase in text, "Crashlytics run-script phase not found"
+          project.write_text(text.replace(phase, 'shellScript = "echo Crashlytics upload skipped\\n";'))
+          EOF
+
+      - name: Build the app without code signing
+        run: |
+          set -o pipefail
+          mkdir -p build
+          if ! xcodebuild \
+              -project iosApp/Reader.xcodeproj \
+              -scheme Reader \
+              -configuration "$CONFIGURATION" \
+              -sdk iphoneos \
+              -destination 'generic/platform=iOS' \
+              -derivedDataPath build/ios-derived \
+              -skipPackagePluginValidation \
+              -skipMacroValidation \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGN_ENTITLEMENTS="" \
+              DEVELOPMENT_TEAM="" \
+              build > build/xcodebuild.log 2>&1; then
+            echo "::group::Errors"
+            grep -n -E "error:|^e: |FAILURE:|What went wrong|Exception|\*\* BUILD FAILED" build/xcodebuild.log | head -n 200 || true
+            echo "::endgroup::"
+            tail -n 250 build/xcodebuild.log
+            exit 1
+          fi
+          tail -n 20 build/xcodebuild.log
+
+      - name: Package the IPA
+        run: |
+          set -euo pipefail
+          APP="$(find "build/ios-derived/Build/Products/${CONFIGURATION}-iphoneos" -maxdepth 1 -name '*.app' -type d | head -n 1)"
+          echo "App bundle: $APP"
+          mkdir -p build/ipa/Payload
+          cp -R "$APP" build/ipa/Payload/
+          (cd build/ipa && zip -qry "../Episteme-ChatGPT-unsigned.ipa" Payload)
+          ls -lh build/Episteme-ChatGPT-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Episteme-ChatGPT-unsigned-ipa
+          path: build/Episteme-ChatGPT-unsigned.ipa
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: xcodebuild-log
+          path: build/xcodebuild.log
+          retention-days: 7
