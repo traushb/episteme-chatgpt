@@ -26,6 +26,7 @@ struct ContentView: View {
     private let audiobookPlayer = AudiobookPlayerController()
     private let mediaOverlayPlayer = MediaOverlayPlayerController()
     private let cloudFolderSync = LocalCloudFolderSyncController()
+    private let chatGptAuth = ChatGptAuthController()
     @StateObject private var localStoreKit = LocalStoreKitController()
     @StateObject private var localAccount = LocalAccountController()
     @Environment(\.scenePhase) private var scenePhase
@@ -207,6 +208,9 @@ struct ContentView: View {
             sweepStaleTemporaryFiles()
             localStoreKit.attach(to: bridge)
             localAccount.attach(to: bridge)
+            // Sign in with ChatGPT for the PDF answer check (separate from the
+            // Episteme account: it only powers requests to the user's plan).
+            chatGptAuth.attach(to: bridge)
             // Pure-CloudKit library sync is Pro-gated. Forward StoreKit truth;
             // sync data plane itself needs no login (iCloud identity only).
             localAccount.setProSyncEnabled(localStoreKit.proSyncEnabled)

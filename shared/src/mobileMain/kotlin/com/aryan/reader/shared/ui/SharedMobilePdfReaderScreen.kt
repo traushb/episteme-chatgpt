@@ -207,6 +207,8 @@ import com.aryan.reader.shared.ReaderRecapRequest
 import com.aryan.reader.shared.ReaderRecapSection
 import com.aryan.reader.shared.SharedSummaryCache
 import com.aryan.reader.shared.ReaderAiResultState
+import com.aryan.reader.shared.chatgpt.SharedPdfAnswerCheckHost
+import com.aryan.reader.shared.chatgpt.SharedPdfAnswerCheckRequest
 import com.aryan.reader.shared.ReaderExtrasState
 import com.aryan.reader.shared.BuiltInPdfReaderThemes
 import com.aryan.reader.shared.reader.DefaultPdfReaderSettings
@@ -464,6 +466,7 @@ fun SharedMobilePdfReaderScreen(
     onShowBottomToolbarChange: (Boolean) -> Unit = {},
     isPdfExportBusy: Boolean = false,
     isDebugBuild: Boolean = false,
+    answerCheck: SharedPdfAnswerCheckHost? = null,
 ) {
     SharedMobilePdfReaderHost(
         book = book,
@@ -558,6 +561,7 @@ fun SharedMobilePdfReaderScreen(
         modifier = modifier,
         hostConfig = SharedPdfReaderHostConfig.fullScreen(book.id),
         isDebugBuild = isDebugBuild,
+        answerCheck = answerCheck,
     )
 }
 
@@ -675,6 +679,8 @@ fun SharedMobilePdfReaderHost(
      * debug builds expose the "Try Episteme" demo artwork action.
      */
     isDebugBuild: Boolean = false,
+    /** "Check my answers with ChatGPT"; null hides the action (hosts without a ChatGPT connection). */
+    answerCheck: SharedPdfAnswerCheckHost? = null,
 ) {
     val readerSessionKey = hostConfig.sessionKey
     val ownsSystemUi = hostConfig.owns(SharedPdfReaderGlobalResource.SYSTEM_UI)
@@ -1103,6 +1109,22 @@ fun SharedMobilePdfReaderHost(
         preserveImageColors = readerState.preserveImageColors,
     )
     val isCurrentPageBlank = (virtualLayout.getOrNull(readerState.pageIndex) as? SharedPdfVirtualPage.BlankPage) != null
+    // Checks the PDF page under the reader (annotations are keyed by PDF page),
+    // with whatever ink, text boxes and highlights it carries right now.
+    val requestAnswerCheck: (() -> Unit)? = answerCheck?.let { check ->
+        {
+            val pdfPage = readerState.currentNearestPdfPageIndex ?: 0
+            check.onCheck(
+                SharedPdfAnswerCheckRequest(
+                    book = book,
+                    pdfPageIndex = pdfPage,
+                    pageLabel = "${pdfPage + 1}",
+                    password = pdfPassword,
+                    annotations = readerState.annotations.filter { it.pageIndex == pdfPage },
+                )
+            )
+        }
+    }
     val prefetchedTtsPageIndex = (ttsPageIndex + 1).coerceAtMost(pageCount - 1)
     val prefetchedTtsTextSession = rememberPdfTextPageSession(book, prefetchedTtsPageIndex, pdfPassword)
     val activeTheme = remember(readerSessionKey, readerState.themeId, customReaderThemes) {
@@ -2606,6 +2628,8 @@ fun SharedMobilePdfReaderHost(
                             ).statusBarsVisible,
                             isDebugBuild = isDebugBuild,
                             onDrawDebugDemoAnnotations = ::drawDebugDemoAnnotations,
+                            onCheckAnswers = requestAnswerCheck?.takeIf { ownsGlobalModal },
+                            isCheckingAnswers = answerCheck?.state?.isBusy == true,
                         )
                         if (
                             pdfTabsEnabled &&
@@ -5048,6 +5072,13 @@ fun SharedMobilePdfReaderHost(
             onDismiss = { showAiHub = false },
         )
     }
+    if (answerCheck != null && answerCheck.state.isVisible && ownsGlobalModal) {
+        SharedPdfAnswerCheckSheet(
+            host = answerCheck,
+            bookTitle = book.title?.takeIf { it.isNotBlank() } ?: book.displayName,
+            isMainTtsActive = isPdfTtsPlayingOrLoading,
+        )
+    }
     LaunchedEffect(readerExtrasState.aiResult) {
         val pending = pendingSummarySave ?: return@LaunchedEffect
         val result = readerExtrasState.aiResult
@@ -5448,6 +5479,8 @@ private fun SharedMobilePdfReaderTopBar(
     applySystemBarInsets: Boolean,
     isDebugBuild: Boolean = false,
     onDrawDebugDemoAnnotations: () -> Unit = {},
+    onCheckAnswers: (() -> Unit)? = null,
+    isCheckingAnswers: Boolean = false,
 ) {
     val searchFocusRequester = remember { FocusRequester() }
     val searchKeyboardController = LocalSoftwareKeyboardController.current
@@ -5566,6 +5599,13 @@ private fun SharedMobilePdfReaderTopBar(
                                 else -> Unit
                             }
                         }
+                        if (onCheckAnswers != null) {
+                            SharedMobilePdfTopToolButton(
+                                readerString("chatgpt_check_answers", "Check answers with ChatGPT"),
+                                onClick = onCheckAnswers,
+                                isLoading = isCheckingAnswers,
+                            ) { Icon(SharedReaderIcons.FactCheck, contentDescription = null) }
+                        }
                         if (isDebugBuild) {
                             // Android parity (PdfToolbars includeDebugActions):
                             // debug-only "Try Episteme!" demo artwork.
@@ -5647,6 +5687,15 @@ private fun SharedMobilePdfReaderTopBar(
                         }
                     }
                 }
+                if (onCheckAnswers != null) SharedMobilePdfOverflowItem(
+                    readerString("chatgpt_check_answers", "Check answers with ChatGPT"),
+                    enabled = !isCheckingAnswers,
+                    leadingIcon = { Icon(SharedReaderIcons.FactCheck, contentDescription = null) },
+                    onClick = {
+                        showMoreMenu = false
+                        onCheckAnswers()
+                    }
+                )
                 if (toolbarPreferences.isVisible(PdfReaderTool.FILE_INFO)) SharedMobilePdfOverflowItem(
                     sharedPdfReaderToolTitle(PdfReaderTool.FILE_INFO),
                     leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },

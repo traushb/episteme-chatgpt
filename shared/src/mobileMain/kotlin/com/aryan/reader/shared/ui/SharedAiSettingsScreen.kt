@@ -147,6 +147,8 @@ fun SharedAiSettingsScreen(
     // hide cloud TTS model/voice/cache controls while the TTS logic stays.
     // Defaults stay true so Android behavior remains the benchmark.
     showCloudTts: Boolean = true,
+    /** Host-specific block shown above the API keys (iOS: Sign in with ChatGPT). */
+    headerContent: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var currentSettings by remember(settings) { mutableStateOf(settings) }
@@ -203,6 +205,10 @@ fun SharedAiSettingsScreen(
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            if (headerContent != null) {
+                headerContent()
+                HorizontalDivider()
+            }
             Text(strings.savedKeys, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             // Providers come from the host's labels so new key types (e.g. Fish)
             // appear without screen changes.

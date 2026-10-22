@@ -18,6 +18,8 @@ object SharedReaderIcons {
     private const val FORMAT_SIZE_PATH = "M560,800L560,280L360,280L360,160L880,160L880,280L680,280L680,800L560,800ZM200,800L200,480L80,480L80,360L440,360L440,480L320,480L320,800L200,800Z"
 
     private const val MUSIC_NOTE_PATH = "M287,793Q240,746 240,680Q240,614 287,567Q334,520 400,520Q423,520 442.5,525.5Q462,531 480,542L480,120L720,120L720,280L560,280L560,680Q560,746 513,793Q466,840 400,840Q334,840 287,793Z"
+    // Material Symbols "fact_check": a sheet of answer lines with a tick.
+    private const val FACT_CHECK_PATH = "M160,840Q127,840 103.5,816.5Q80,793 80,760L80,200Q80,167 103.5,143.5Q127,120 160,120L800,120Q833,120 856.5,143.5Q880,167 880,200L880,760Q880,793 856.5,816.5Q833,840 800,840L160,840ZM160,760L800,760L800,200L160,200L160,760ZM200,680L400,680L400,600L200,600L200,680ZM582,600L780,402L723,345L582,487L525,430L469,487L582,600ZM200,520L400,520L400,440L200,440L200,520ZM200,360L400,360L400,280L200,280L200,360Z"
 
     val Slider: ImageVector by lazy { iconOf("ReaderSlider", SLIDER_PATH) }
     val Contrast: ImageVector by lazy { iconOf("ReaderContrast", CONTRAST_PATH) }
@@ -28,6 +30,7 @@ object SharedReaderIcons {
     val PinDrop: ImageVector by lazy { iconOf("ReaderPinDrop", PINDROP_PATH) }
     val FormatSize: ImageVector by lazy { iconOf("ReaderFormatSize", FORMAT_SIZE_PATH) }
     val MusicNote: ImageVector by lazy { iconOf("ReaderMusicNote", MUSIC_NOTE_PATH) }
+    val FactCheck: ImageVector by lazy { iconOf("ReaderFactCheck", FACT_CHECK_PATH) }
 
     private fun iconOf(name: String, pathData: String) =
         ImageVector.Builder(

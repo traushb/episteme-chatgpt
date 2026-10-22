@@ -309,6 +309,7 @@ import com.aryan.reader.shared.ui.SharedMobileDictionarySettingsSheet
 import com.aryan.reader.shared.ui.SharedMobileInfoConfirmationDialog
 import com.aryan.reader.shared.ui.SharedAiSettingsScreen
 import com.aryan.reader.shared.ui.SharedAiSettingsStrings
+import com.aryan.reader.shared.ui.SharedChatGptAccountSection
 import com.aryan.reader.shared.ui.IosSharedMobileCloudTts
 import com.aryan.reader.shared.ui.sharedAnnotationExportFormatOptions
 import com.aryan.reader.shared.ui.SharedMobileHomeScreen
@@ -464,6 +465,9 @@ class ReaderIosBridge internal constructor(
     init {
         applyIosBackupExclusions()
     }
+
+    /** Sign in with ChatGPT for the PDF answer check (see ChatGptAuthController.swift). */
+    val chatGpt: IosChatGptBridge = IosChatGptBridge()
 
     private var systemUiHandler: ((statusHidden: Boolean, navigationHidden: Boolean, lightContent: Boolean, backgroundArgb: Long) -> Unit)? = null
     private var latestSystemUiState: IosSystemUiState? = null
@@ -3941,6 +3945,14 @@ private fun ReaderIosApp(
     var opdsState by remember { mutableStateOf(opdsController.state) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val chatGptAnswerCheck = remember(bridge) {
+        IosChatGptAnswerCheckController(
+            chatGpt = bridge.chatGpt,
+            scope = scope,
+            isNetworkAvailable = { bridge.readerAiNetworkAvailable },
+            appLanguageTag = { state.appLanguageTag },
+        )
+    }
     val pdfSidecarWriteJobs = remember { mutableMapOf<String, Job>() }
     val latestPdfStates = remember { mutableStateMapOf<String, SharedPdfReaderState>() }
     val latestPdfBooks = remember { mutableStateMapOf<String, BookItem>() }
@@ -5722,6 +5734,7 @@ private fun ReaderIosApp(
             book = paneBook,
             onBack = onBack,
             onOpenSplit = onOpenSplit,
+            answerCheck = chatGptAnswerCheck.host.takeIf { !effectiveReaderAiSettings.hideReaderAiFeatures },
             readerAiAvailable = readerAiAvailable,
             readerExtrasState = readerExtrasState.copy(cloudTts = readerCloudTts.state),
             cloudTts = if (IosFeatureGating.SHOW_CLOUD_TTS) readerCloudTts else null,
@@ -7110,6 +7123,24 @@ private fun ReaderIosApp(
                         onFishLanguageSelectionChange = { selection ->
                             iosCloudVoiceLanguage = selection
                             iosSaveFishLanguageFilter(selection)
+                        },
+                        headerContent = {
+                            val chatGptConnection = bridge.chatGpt.connection
+                            LaunchedEffect(chatGptConnection.isConnected, chatGptConnection.planUsageAllowed) {
+                                if (chatGptConnection.isConnected && chatGptConnection.planUsageAllowed) {
+                                    chatGptAnswerCheck.refreshModels()
+                                }
+                            }
+                            SharedChatGptAccountSection(
+                                connection = chatGptConnection,
+                                models = chatGptAnswerCheck.models,
+                                selectedModelSlug = chatGptAnswerCheck.selectedModelSlug,
+                                isLoadingModels = chatGptAnswerCheck.isLoadingModels,
+                                onSignIn = chatGptAnswerCheck::signIn,
+                                onSignOut = chatGptAnswerCheck::signOut,
+                                onSelectModel = chatGptAnswerCheck::selectModel,
+                                onLoadModels = chatGptAnswerCheck::refreshModels,
+                            )
                         },
                         modifier = Modifier.fillMaxSize().statusBarsPadding(),
                     )
