@@ -34,6 +34,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import platform.Foundation.NSLocale
+import platform.Foundation.NSLocaleLanguageCode
 import platform.Foundation.NSUserDefaults
 
 private const val CHATGPT_MODEL_DEFAULTS_KEY = "reader.chatgpt.answer_check_model.v1"
@@ -334,8 +335,8 @@ internal class IosChatGptAnswerCheckController(
     private fun replyLanguageName(): String {
         val tag = appLanguageTag()?.takeIf(String::isNotBlank) ?: currentIosLanguageTag()
         val language = tag.substringBefore('-')
-        return NSLocale(localeIdentifier = "en_US").localizedStringForLanguageCode(language)
-            ?.takeIf(String::isNotBlank)
+        return NSLocale(localeIdentifier = "en_US").displayNameForKey(NSLocaleLanguageCode, language)
+            ?.takeIf { it.isNotBlank() }
             ?: "English"
     }
 }
