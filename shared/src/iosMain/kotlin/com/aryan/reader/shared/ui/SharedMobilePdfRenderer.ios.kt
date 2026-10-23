@@ -27,23 +27,29 @@ import com.aryan.reader.shared.pdfium.c.FPDFBitmap_FillRect
 import com.aryan.reader.shared.pdfium.c.FPDFBitmap_GetBuffer
 import com.aryan.reader.shared.pdfium.c.FPDFBitmap_GetStride
 import com.aryan.reader.shared.pdfium.c.FPDF_CloseDocument
+import com.aryan.reader.shared.pdfium.c.FPDF_DOCUMENT
 import com.aryan.reader.shared.pdfium.c.FPDF_ClosePage
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageCount
 import com.aryan.reader.shared.pdfium.c.FPDF_GetLastError
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageHeightF
+import com.aryan.reader.shared.pdfium.c.FPDF_GetPageSizeByIndex
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageWidthF
 import com.aryan.reader.shared.pdfium.c.FPDF_LoadDocument
 import com.aryan.reader.shared.pdfium.c.FPDF_LoadPage
 import com.aryan.reader.shared.pdfium.c.FPDF_RenderPageBitmap
 import cnames.structs.fpdf_page_t__
+import kotlinx.cinterop.DoubleVar
+import kotlinx.cinterop.alloc
 import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.convert
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.get
 import kotlinx.cinterop.plus
+import kotlinx.cinterop.ptr
 import kotlinx.cinterop.useContents
 import kotlinx.cinterop.usePinned
+import kotlinx.cinterop.value
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import org.jetbrains.skia.ColorAlphaType
@@ -68,9 +74,17 @@ internal actual fun rememberSharedMobilePdfPageRender(
     reverseColorMode: PdfReverseColorMode,
     preserveImageColors: Boolean,
 ): SharedMobilePdfPageRender {
-    var render by remember(book.path, pageIndex, password, reverseColorMode, preserveImageColors) { mutableStateOf(SharedMobilePdfPageRender()) }
+    // Start at the page's final size: a cached render, or a placeholder with the
+    // page's own aspect ratio (see IosPdfPageAspectCache).
+    var render by remember(book.path, pageIndex, password, reverseColorMode, preserveImageColors) {
+        mutableStateOf(
+            IosPdfPageCache.get(book.path, pageIndex, password, reverseColorMode, preserveImageColors)
+                ?: SharedMobilePdfPageRender(aspectRatio = IosPdfPageAspectCache.aspectRatio(book.path, pageIndex))
+        )
+    }
 
     LaunchedEffect(book.path, pageIndex, password, reverseColorMode, preserveImageColors) {
+        if (render.bitmap != null) return@LaunchedEffect
         val cached = IosPdfPageCache.get(book.path, pageIndex, password, reverseColorMode, preserveImageColors)
         if (cached != null) {
             render = cached
@@ -227,6 +241,65 @@ private object IosPdfPageCache {
         reverseColorMode: PdfReverseColorMode,
         preserveImageColors: Boolean,
     ): String = "${path.orEmpty()}|$pageIndex|${password.orEmpty()}|${reverseColorMode.id}|$preserveImageColors"
+}
+
+/**
+ * Page aspect ratios per document, read from the page tree on the first render.
+ *
+ * The vertical reader lays a page out before its bitmap exists. With a generic
+ * placeholder ratio the page changed height once its render landed, and a page
+ * entering above the list's anchor then pushed everything below it back down:
+ * slow upward scrolls were undone on every page and only a hard fling got past.
+ */
+private object IosPdfPageAspectCache {
+    private const val MaxDocuments = 8
+    private val documents = LinkedHashMap<String, FloatArray>()
+    private val lock = NSLock()
+
+    /** The page's ratio, else the document's first known one, else the default. */
+    fun aspectRatio(path: String?, pageIndex: Int): Float = lock.withLock {
+        val aspects = documents[path.orEmpty()] ?: return@withLock DefaultSharedMobilePdfPageAspectRatio
+        aspects.getOrNull(pageIndex)?.takeIf { it > 0f }
+            ?: aspects.firstOrNull { it > 0f }
+            ?: DefaultSharedMobilePdfPageAspectRatio
+    }
+
+    fun covers(path: String?, pageCount: Int): Boolean = lock.withLock {
+        documents[path.orEmpty()]?.size == pageCount
+    }
+
+    fun put(path: String?, aspects: FloatArray) {
+        lock.withLock {
+            val key = path.orEmpty()
+            documents.remove(key)
+            documents[key] = aspects
+            while (documents.size > MaxDocuments) {
+                documents.remove(documents.keys.first())
+            }
+        }
+    }
+
+    /** A finished render is authoritative for its page (the file may have changed). */
+    fun update(path: String?, pageIndex: Int, aspectRatio: Float) {
+        lock.withLock {
+            val aspects = documents[path.orEmpty()] ?: return@withLock
+            if (pageIndex in aspects.indices) aspects[pageIndex] = aspectRatio
+        }
+    }
+}
+
+/** 0 marks a page whose size PDFium could not read. */
+private fun readIosPdfPageAspectRatios(document: FPDF_DOCUMENT, pageCount: Int): FloatArray = memScoped {
+    val width = alloc<DoubleVar>()
+    val height = alloc<DoubleVar>()
+    FloatArray(pageCount) { index ->
+        val read = FPDF_GetPageSizeByIndex(document, index, width.ptr, height.ptr) != 0
+        if (read && width.value > 0.0 && height.value > 0.0) {
+            (width.value / height.value).toFloat().coerceIn(0.1f, 10f)
+        } else {
+            0f
+        }
+    }
 }
 
 private object IosPdfThumbnailCache {
@@ -431,6 +504,9 @@ private object IosPdfiumRenderer {
                         openError = SharedMobilePdfOpenError.INVALID_DOCUMENT,
                     )
                 }
+                if (!IosPdfPageAspectCache.covers(path, pageCount)) {
+                    IosPdfPageAspectCache.put(path, readIosPdfPageAspectRatios(document, pageCount))
+                }
                 val safePageIndex = pageIndex.coerceIn(0, pageCount - 1)
                 val page = FPDF_LoadPage(document, safePageIndex)
                     ?: return@withPdfium SharedMobilePdfPageRender(
@@ -441,6 +517,7 @@ private object IosPdfiumRenderer {
                     val pageWidth = FPDF_GetPageWidthF(page).coerceAtLeast(1f)
                     val pageHeight = FPDF_GetPageHeightF(page).coerceAtLeast(1f)
                     val aspectRatio = (pageWidth / pageHeight).coerceIn(0.1f, 10f)
+                    IosPdfPageAspectCache.update(path, safePageIndex, aspectRatio)
                     val renderStartedAt = TimeSource.Monotonic.markNow()
                     val targetHeight = MaxRenderedPageHeightPx
                     val scale = targetHeight / pageHeight
