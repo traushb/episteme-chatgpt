@@ -5,6 +5,11 @@ name: iOS unsigned IPA
 # are not in the repository are fetched from their upstream sources: PDFium
 # from bblanchon/pdfium-binaries (the build scripts expect that layout), and
 # libarchive/xz from their own repositories.
+#
+# The app binary keeps its symbol table and the dSYMs are uploaded next to the
+# IPA, so device crash reports (.ips) can be read. Dispatching this workflow
+# with symbolicate_run_id and crash_offsets maps the "imageOffset" values of
+# Reader frames in such a report to functions, using that build's symbols.
 
 on:
   workflow_dispatch:
@@ -14,19 +19,28 @@ on:
         type: choice
         options: [Release, Debug]
         default: Release
+      symbolicate_run_id:
+        description: Instead of building, symbolicate a crash from the IPA built by this run ID
+        default: ""
+      crash_offsets:
+        description: Space-separated imageOffset values of Reader frames in the .ips report
+        default: ""
   push:
     branches:
       - claude/chatgpt-answer-analysis-ios-evrpz8
 
 concurrency:
-  group: ios-unsigned-ipa-${{ github.ref }}
+  group: ios-unsigned-ipa-${{ github.ref }}${{ inputs.symbolicate_run_id && '-symbolicate' || '' }}
   cancel-in-progress: true
 
 permissions:
   contents: read
+  # Downloading the symbols of an earlier run.
+  actions: read
 
 jobs:
   ipa:
+    if: ${{ !inputs.symbolicate_run_id }}
     # Intel runners have 14 GB of RAM (Apple Silicon ones 7 GB); the
     # Kotlin/Native release link of the shared module needs the headroom.
     runs-on: macos-15-intel
@@ -138,6 +152,7 @@ jobs:
               CODE_SIGN_IDENTITY="" \
               CODE_SIGN_ENTITLEMENTS="" \
               DEVELOPMENT_TEAM="" \
+              STRIP_INSTALLED_PRODUCT=NO \
               build > build/xcodebuild.log 2>&1; then
             echo "::group::Errors"
             grep -n -E "error:|^e: |FAILURE:|What went wrong|Exception|\*\* BUILD FAILED" build/xcodebuild.log | head -n 200 || true
@@ -157,10 +172,26 @@ jobs:
           (cd build/ipa && zip -qry "../Episteme-ChatGPT-unsigned.ipa" Payload)
           ls -lh build/Episteme-ChatGPT-unsigned.ipa
 
+      - name: Collect debug symbols
+        run: |
+          set -euo pipefail
+          PRODUCTS="build/ios-derived/Build/Products/${CONFIGURATION}-iphoneos"
+          # Matches "slice_uuid" in the crash reports of this build.
+          dwarfdump --uuid "$PRODUCTS/Reader.app/Reader"
+          (cd "$PRODUCTS" && zip -qry "$GITHUB_WORKSPACE/build/Episteme-ChatGPT-dSYMs.zip" ./*.dSYM) \
+            || echo "No dSYMs were produced"
+
       - uses: actions/upload-artifact@v4
         with:
           name: Episteme-ChatGPT-unsigned-ipa
           path: build/Episteme-ChatGPT-unsigned.ipa
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Episteme-ChatGPT-dSYMs
+          path: build/Episteme-ChatGPT-dSYMs.zip
+          if-no-files-found: warn
           retention-days: 14
 
       - uses: actions/upload-artifact@v4
@@ -169,3 +200,41 @@ jobs:
           name: xcodebuild-log
           path: build/xcodebuild.log
           retention-days: 7
+
+  symbolicate:
+    if: ${{ inputs.symbolicate_run_id }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.symbolicate_run_id }}
+          github-token: ${{ github.token }}
+          path: artifacts
+
+      - name: Symbolicate Reader frames
+        env:
+          OFFSETS: ${{ inputs.crash_offsets }}
+        run: |
+          set -euo pipefail
+          IPA="$(find artifacts -name '*.ipa' | head -n 1)"
+          unzip -q -o "$IPA" 'Payload/Reader.app/Reader' -d app
+          TARGETS="app/Payload/Reader.app/Reader"
+          DSYMS="$(find artifacts -name '*dSYMs.zip' | head -n 1)"
+          if [ -n "$DSYMS" ]; then
+            unzip -q -o "$DSYMS" -d dsyms
+            DWARF="dsyms/Reader.app.dSYM/Contents/Resources/DWARF/Reader"
+            # The dSYM adds file and line; the binary's own symbol table also
+            # covers code built without debug info (the Kotlin framework).
+            if [ -f "$DWARF" ]; then TARGETS="$DWARF $TARGETS"; fi
+          fi
+          for target in $TARGETS; do
+            echo "== $(dwarfdump --uuid "$target")"
+            for offset in $OFFSETS; do
+              case "$offset" in
+                ''|*[!0-9]*) echo "skipping '$offset' (expected a decimal imageOffset)"; continue ;;
+              esac
+              address="$(printf '0x%x' $((0x100000000 + offset)))"
+              echo "$offset  $(atos -arch arm64 -o "$target" -l 0x100000000 "$address")"
+            done
+          done
