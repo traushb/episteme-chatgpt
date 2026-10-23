@@ -3,8 +3,8 @@
 //  Reader
 //
 //  Firebase is configured only when GoogleService-Info.plist ships in the
-//  app (see ReaderApp). Without it `Auth.auth()` raises an Objective-C
-//  exception instead of returning a signed-out instance, so code that runs
+//  app (see ReaderApp). Without it `Auth.auth()` stops the app with
+//  `fatalError` instead of returning a signed-out instance, so code that runs
 //  at launch or on foreground before any sign-in reads the user from here.
 //
 
