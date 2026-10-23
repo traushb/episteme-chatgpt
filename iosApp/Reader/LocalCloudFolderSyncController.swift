@@ -319,7 +319,7 @@ final class LocalCloudFolderSyncController {
 
     private func context() async throws -> (uid: String, store: CloudFolderStore, token: String, deviceId: String) {
         #if canImport(FirebaseAuth)
-        guard let uid = Auth.auth().currentUser?.uid, !uid.isEmpty else {
+        guard let uid = FirebaseAvailability.currentUser?.uid, !uid.isEmpty else {
             throw AbortSync(transient: false)
         }
         #else
@@ -369,7 +369,7 @@ final class LocalCloudFolderSyncController {
 
     func currentUid() -> String? {
         #if canImport(FirebaseAuth)
-        return Auth.auth().currentUser?.uid
+        return FirebaseAvailability.currentUser?.uid
         #else
         return nil
         #endif

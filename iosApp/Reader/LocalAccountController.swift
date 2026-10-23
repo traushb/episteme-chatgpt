@@ -391,7 +391,7 @@ final class LocalAccountController: NSObject, ObservableObject {
 #if canImport(FirebaseAuth) && canImport(FirebaseCore) && canImport(FirebaseFirestore) && canImport(GoogleSignIn)
         guard
             FirebaseApp.app() != nil,
-            let uid = Auth.auth().currentUser?.uid
+            let uid = FirebaseAvailability.currentUser?.uid
         else {
             return .authorizationRequired
         }
@@ -409,7 +409,7 @@ final class LocalAccountController: NSObject, ObservableObject {
             for file in driveFiles {
                 try await deleteDriveFile(fileID: file.id, accessToken: accessToken)
             }
-            guard generation == cloudSyncGeneration, Auth.auth().currentUser?.uid == uid else {
+            guard generation == cloudSyncGeneration, FirebaseAvailability.currentUser?.uid == uid else {
                 return .authorizationRequired
             }
             try await deleteCloudFirestoreData(uid: uid)
@@ -631,7 +631,7 @@ final class LocalAccountController: NSObject, ObservableObject {
             // Firebase has restored its own session, it can publish uid:nil and
             // bounce the UI to signed-out; log both outcomes with the Firebase
             // view at that instant so the ordering is provable.
-            let firebaseUid = Auth.auth().currentUser?.uid
+            let firebaseUid = FirebaseAvailability.currentUser?.uid
             do {
                 let user = try await GIDSignIn.sharedInstance.restorePreviousSignIn()
                 googleDriveAuthorized = user.grantedScopes?.contains(Self.googleDriveScope) == true
@@ -656,7 +656,7 @@ final class LocalAccountController: NSObject, ObservableObject {
         UserDefaults.standard.removeObject(forKey: Self.cloudShelfObservationsKey)
         UserDefaults.standard.removeObject(forKey: Self.cloudFontObservationsKey)
 #if canImport(FirebaseAuth) && canImport(FirebaseCore)
-        if let uid = Auth.auth().currentUser?.uid {
+        if let uid = FirebaseAvailability.currentUser?.uid {
             Task { @MainActor in
                 await self.unregisterDevice(uid: uid)
             }
@@ -696,7 +696,7 @@ final class LocalAccountController: NSObject, ObservableObject {
             bridge?.completeAccountDeletion(success: false, message: "Account deletion is unavailable.")
             return
         }
-        guard let user = Auth.auth().currentUser else {
+        guard let user = FirebaseAvailability.currentUser else {
             publish(status: "You are not signed in.")
             bridge?.completeAccountDeletion(success: false, message: "You are not signed in.")
             return
@@ -743,7 +743,7 @@ final class LocalAccountController: NSObject, ObservableObject {
     /// is released for reclaim; if a later step fails the user can retry and
     /// the worker answers idempotently ("already deleted").
     private func reauthenticateAndDeleteAccount(credential: AuthCredential) async throws {
-        guard let user = Auth.auth().currentUser else { throw AccountDeleteError.notSignedIn }
+        guard let user = FirebaseAvailability.currentUser else { throw AccountDeleteError.notSignedIn }
         let uid = user.uid
         do {
             try await user.reauthenticate(with: credential)
@@ -858,7 +858,7 @@ final class LocalAccountController: NSObject, ObservableObject {
         // suspension can outlast the TTL. Re-arm while signed in; the shared
         // delay fires immediately when the token is already past its refresh
         // point, otherwise it waits out the remainder.
-        if FirebaseApp.app() != nil, let uid = Auth.auth().currentUser?.uid,
+        if FirebaseApp.app() != nil, let uid = FirebaseAvailability.currentUser?.uid,
            authTokenRefreshTask == nil {
             scheduleAuthTokenRefresh(uid: uid)
         }
@@ -1604,7 +1604,7 @@ final class LocalAccountController: NSObject, ObservableObject {
     /// Current Firebase UID for the folder-sync executor/store scope.
     func folderSyncAccountID() -> String? {
 #if canImport(FirebaseAuth)
-        return Auth.auth().currentUser?.uid
+        return FirebaseAvailability.currentUser?.uid
 #else
         return nil
 #endif
@@ -1621,7 +1621,7 @@ final class LocalAccountController: NSObject, ObservableObject {
 
 #if canImport(FirebaseFirestore) && canImport(FirebaseAuth)
     private func syncFirestoreBookMetadata(localJSON: String) async throws -> String {
-        guard let uid = Auth.auth().currentUser?.uid else {
+        guard let uid = FirebaseAvailability.currentUser?.uid else {
             throw CloudSyncError.firebaseAccountRequired
         }
         do {
@@ -2195,7 +2195,7 @@ final class LocalAccountController: NSObject, ObservableObject {
     /// UI can opt into these handlers without coupling itself to Firebase.
     func registeredDevices() async -> [[String: Any]] {
 #if canImport(FirebaseFirestore) && canImport(FirebaseAuth)
-        guard let uid = Auth.auth().currentUser?.uid else { return [] }
+        guard let uid = FirebaseAvailability.currentUser?.uid else { return [] }
         do {
             let snapshot = try await Firestore.firestore()
                 .collection("users")
@@ -2221,7 +2221,7 @@ final class LocalAccountController: NSObject, ObservableObject {
 
     func revokeDevice(deviceID: String) async -> Bool {
 #if canImport(FirebaseFirestore) && canImport(FirebaseAuth)
-        guard let uid = Auth.auth().currentUser?.uid, !deviceID.isEmpty else { return false }
+        guard let uid = FirebaseAvailability.currentUser?.uid, !deviceID.isEmpty else { return false }
         do {
             try await Firestore.firestore()
                 .collection("users")
@@ -4310,7 +4310,7 @@ final class LocalAccountController: NSObject, ObservableObject {
             publishSignedOut(status: status)
             return
         }
-        let user = Auth.auth().currentUser
+        let user = FirebaseAvailability.currentUser
         // Every publish is logged, including the anonymous ones. A publish that
         // ships uid:nil to the UI is the only way the app can appear signed out
         // without `signout_requested` or `session_dropped` ever being logged,
@@ -4375,7 +4375,7 @@ final class LocalAccountController: NSObject, ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(max(delayMs, 0)) * 1_000_000)
             guard !Task.isCancelled else { return }
             guard let self, FirebaseApp.app() != nil else { return }
-            guard let user = Auth.auth().currentUser, user.uid == uid else { return }
+            guard let user = FirebaseAvailability.currentUser, user.uid == uid else { return }
             user.getIDTokenForcingRefresh(true) { [weak self] token, _ in
                 Task { @MainActor in
                     guard let self, let bridge = self.bridge else { return }

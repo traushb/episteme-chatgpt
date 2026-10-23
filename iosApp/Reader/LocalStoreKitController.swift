@@ -406,7 +406,7 @@ final class LocalStoreKitController: ObservableObject {
 
     private func refreshServerEntitlements() async {
 #if canImport(FirebaseFirestore) && canImport(FirebaseAuth)
-        guard let uid = Auth.auth().currentUser?.uid else {
+        guard let uid = FirebaseAvailability.currentUser?.uid else {
             isProUnlocked = false
             serverCredits = 0
             serverWalletMicros = 0
@@ -529,7 +529,7 @@ final class LocalStoreKitController: ObservableObject {
 
     private var currentFirebaseUserExists: Bool {
 #if canImport(FirebaseAuth)
-        Auth.auth().currentUser != nil
+        FirebaseAvailability.currentUser != nil
 #else
         false
 #endif
@@ -537,7 +537,7 @@ final class LocalStoreKitController: ObservableObject {
 
     private func freshFirebaseIDToken() async throws -> String {
 #if canImport(FirebaseAuth)
-        guard let user = Auth.auth().currentUser else { throw BillingError.signInRequired }
+        guard let user = FirebaseAvailability.currentUser else { throw BillingError.signInRequired }
         return try await withCheckedThrowingContinuation { continuation in
             user.getIDTokenForcingRefresh(true) { token, error in
                 if let error {
