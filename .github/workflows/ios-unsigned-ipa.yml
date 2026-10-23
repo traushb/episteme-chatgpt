@@ -42,6 +42,8 @@ jobs:
   shared-checks:
     # The answer-check logic and its unit tests on the JVM, plus the rule that
     # keeps platform imports out of shared sources, before the macOS build.
+    # Android host tests also compile the shared phone UI; the desktop target
+    # cannot stand in, it lacks the OCR gate's actual declarations upstream.
     if: ${{ !inputs.symbolicate_run_id }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -53,16 +55,39 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      - name: Android SDK platform for the shared library
+        run: |
+          set -euo pipefail
+          SDKMANAGER="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Configure Gradle
+        run: |
+          cat >> gradle.properties <<'EOF'
+          kotlin.mpp.applyDefaultHierarchyTemplate=false
+          kotlin.daemon.jvmargs=-Xmx6g -XX:+UseG1GC -Dfile.encoding=UTF-8
+          EOF
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           cache-read-only: false
 
       - name: ChatGPT answer-check tests and portable-source check
         run: |
+          set -euo pipefail
           chmod +x gradlew
-          ./gradlew -PdesktopOnly=true \
-            :shared:verifyPortableSharedSources \
-            :shared:desktopTest --tests 'com.aryan.reader.shared.chatgpt.*'
+          # The Android library's JVM host-test task; its name follows the AGP version.
+          TASKS="$(./gradlew -q :shared:tasks --all)"
+          # awk reads to the end so printf never meets a closed pipe under pipefail.
+          TEST_TASK="$(printf '%s\n' "$TASKS" | awk '/^test[A-Za-z]*HostTest / && !found {print $1; found = 1}')"
+          if [ -z "$TEST_TASK" ]; then
+            echo "No Android host-test task in :shared. Test tasks:"
+            printf '%s\n' "$TASKS" | grep -i '^test' || true
+            exit 1
+          fi
+          echo "Running :shared:$TEST_TASK"
+          ./gradlew :shared:verifyPortableSharedSources ":shared:$TEST_TASK" --tests 'com.aryan.reader.shared.chatgpt.*'
 
   ipa:
     if: ${{ !inputs.symbolicate_run_id }}
