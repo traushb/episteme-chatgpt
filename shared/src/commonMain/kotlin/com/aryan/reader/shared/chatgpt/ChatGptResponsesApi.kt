@@ -34,13 +34,23 @@ private val ChatGptJson = Json { ignoreUnknownKeys = true; isLenient = true }
 data class ChatGptModel(
     val slug: String,
     val displayName: String,
+    /**
+     * The `reasoning.effort` values the catalog offers for this model, in
+     * catalog order. Empty when it lists none: then only the model's own
+     * default is used and no effort is sent.
+     */
+    val reasoningEfforts: List<String> = emptyList(),
+    /** The effort the model uses when a request sets none, if the catalog says. */
+    val defaultReasoningEffort: String? = null,
 )
 
 /**
  * Parses `GET /v1/models` for a ChatGPT-plan token.
  *
  * The plan route answers with `{"models": [{slug, display_name, visibility}]}`
- * and only `visibility == "list"` entries are meant to be offered. The
+ * and only `visibility == "list"` entries are meant to be offered. Entries
+ * also carry `supported_reasoning_levels` (`[{effort, description}]`) and
+ * `default_reasoning_level`, the same catalog the Codex backend serves. The
  * platform shape (`{"data": [{id}]}`) is accepted as a fallback so a catalog
  * change degrades to a plainer list instead of an empty picker. Returns null
  * when the body is not a catalog at all.
@@ -58,6 +68,12 @@ fun parseChatGptModelCatalog(body: String): List<ChatGptModel>? {
             ChatGptModel(
                 slug = slug,
                 displayName = model.string("display_name")?.trim()?.takeIf(String::isNotEmpty) ?: slug,
+                reasoningEfforts = model["supported_reasoning_levels"]
+                    ?.let { runCatching { it.jsonArray }.getOrNull() }
+                    .orEmpty()
+                    .mapNotNull { level -> (level.asObjectOrNull()?.get("effort") ?: level).effortOrNull() }
+                    .distinct(),
+                defaultReasoningEffort = model["default_reasoning_level"]?.effortOrNull(),
             )
         }.distinctBy { it.slug }
     }
@@ -79,14 +95,42 @@ fun chooseChatGptModel(models: List<ChatGptModel>, preferredSlug: String?): Chat
 }
 
 /**
- * Body for one answer-check request: a single user message carrying the
- * page description and, when available, the rendered page as a data URL.
+ * The saved effort for [model] while the catalog still offers it; null means
+ * "send no effort" (the model's default). A level the catalog dropped is never
+ * sent, so a stale choice cannot fail requests.
+ */
+fun chooseChatGptReasoningEffort(model: ChatGptModel, savedEffort: String?): String? =
+    savedEffort?.takeIf { it in model.reasoningEfforts }
+
+/** Storage form of the effort chosen per model slug. */
+fun encodeChatGptReasoningEfforts(efforts: Map<String, String>): String =
+    JsonObject(efforts.mapValues { (_, effort) -> JsonPrimitive(effort) }).toString()
+
+/** Reads [encodeChatGptReasoningEfforts]; anything unreadable is dropped. */
+fun decodeChatGptReasoningEfforts(value: String?): Map<String, String> {
+    val root = value?.let { runCatching { ChatGptJson.parseToJsonElement(it).jsonObject }.getOrNull() }
+        ?: return emptyMap()
+    return root.mapNotNull { (slug, effort) -> effort.effortOrNull()?.let { slug to it } }.toMap()
+}
+
+/** One item of the user message, in the order the model reads them. */
+sealed interface ChatGptInputPart {
+    data class Text(val text: String) : ChatGptInputPart
+
+    /** [dataUrl] is a `data:image/...;base64,` URL. */
+    data class Image(val dataUrl: String) : ChatGptInputPart
+}
+
+/**
+ * Body for one answer-check request: a single user message whose parts are
+ * the labelled page texts and pictures. [reasoningEffort] null leaves the
+ * `reasoning` field out, which keeps the model's own default.
  */
 fun buildChatGptAnswerCheckRequestBody(
     model: String,
     instructions: String,
-    userText: String,
-    pageImageDataUrl: String?,
+    content: List<ChatGptInputPart>,
+    reasoningEffort: String? = null,
 ): String = buildJsonObject {
     put("model", JsonPrimitive(model))
     put("instructions", JsonPrimitive(instructions))
@@ -94,21 +138,31 @@ fun buildChatGptAnswerCheckRequestBody(
         add(buildJsonObject {
             put("role", JsonPrimitive("user"))
             put("content", buildJsonArray {
-                add(buildJsonObject {
-                    put("type", JsonPrimitive("input_text"))
-                    put("text", JsonPrimitive(userText))
-                })
-                if (pageImageDataUrl != null) {
+                content.forEach { part ->
                     add(buildJsonObject {
-                        put("type", JsonPrimitive("input_image"))
-                        put("image_url", JsonPrimitive(pageImageDataUrl))
-                        // Handwriting needs the high-resolution tiles.
-                        put("detail", JsonPrimitive("high"))
+                        when (part) {
+                            is ChatGptInputPart.Text -> {
+                                put("type", JsonPrimitive("input_text"))
+                                put("text", JsonPrimitive(part.text))
+                            }
+                            is ChatGptInputPart.Image -> {
+                                put("type", JsonPrimitive("input_image"))
+                                put("image_url", JsonPrimitive(part.dataUrl))
+                                // Handwriting and formulas need the high-resolution tiles.
+                                put("detail", JsonPrimitive("high"))
+                            }
+                        }
                     })
                 }
             })
         })
     })
+    if (reasoningEffort != null) {
+        put("reasoning", buildJsonObject {
+            // Numeric levels go out as numbers, as the Codex client sends them.
+            put("effort", reasoningEffort.toLongOrNull()?.let(::JsonPrimitive) ?: JsonPrimitive(reasoningEffort))
+        })
+    }
     put("store", JsonPrimitive(false))
     put("stream", JsonPrimitive(true))
 }.toString()
@@ -242,6 +296,8 @@ private fun streamEventFor(type: String?, json: JsonObject): ChatGptStreamEvent?
 data class ChatGptApiErrorBody(
     val code: String?,
     val message: String?,
+    /** The request field the error is about, such as `reasoning.effort`. */
+    val param: String? = null,
 )
 
 /**
@@ -261,6 +317,7 @@ fun parseChatGptApiError(body: String): ChatGptApiErrorBody {
     return ChatGptApiErrorBody(
         code = code,
         message = node.string("message") ?: node.string("error_description"),
+        param = node.string("param")?.takeIf { it.length <= 100 && ChatGptErrorCodePattern.matches(it) },
     )
 }
 
@@ -278,6 +335,8 @@ enum class ChatGptFailureKind {
     RATE_LIMITED,
     /** The route rejected something in the request (model, input type, field). */
     UNSUPPORTED_REQUEST,
+    /** The model did not accept the reasoning effort chosen for it in settings. */
+    REASONING_EFFORT_REJECTED,
     MODEL_UNAVAILABLE,
     /** The credential was rejected; signing in again is the fix. */
     AUTH_REJECTED,
@@ -306,11 +365,16 @@ data class ChatGptFailure(
             kind == ChatGptFailureKind.AUTH_REJECTED
 }
 
-/** Maps an HTTP status and error code from the plan route to what the user can do about it. */
-fun classifyChatGptFailure(httpStatus: Int?, code: String?): ChatGptFailure {
+/**
+ * Maps an HTTP status, error code and the field it names ([param]) from the
+ * plan route to what the user can do about it.
+ */
+fun classifyChatGptFailure(httpStatus: Int?, code: String?, param: String? = null): ChatGptFailure {
     // Early preview responses used a `_v2_` infix; treat them as the same codes.
     val normalized = code?.replace("subscription_sharing_v2_", "subscription_sharing_")
-    val kind = when (normalized) {
+    val rejectsReasoning = param?.startsWith("reasoning") == true &&
+        (httpStatus == 400 || httpStatus == 422 || normalized == "subscription_sharing_unsupported_capability")
+    val kind = if (rejectsReasoning) ChatGptFailureKind.REASONING_EFFORT_REJECTED else when (normalized) {
         "subscription_sharing_user_not_eligible" -> ChatGptFailureKind.NOT_ELIGIBLE
         "subscription_sharing_usage_limit_exceeded" -> ChatGptFailureKind.USAGE_LIMIT
         "subscription_sharing_usage_unavailable",
@@ -347,3 +411,9 @@ private fun JsonElement.asObjectOrNull(): JsonObject? = this as? JsonObject
 
 private fun JsonObject.string(key: String): String? =
     (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+
+/** A catalog effort value: a short lowercase word, or a number for model-defined levels. */
+private fun JsonElement.effortOrNull(): String? =
+    (this as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { ChatGptEffortPattern.matches(it) }
+
+private val ChatGptEffortPattern = Regex("[a-z0-9_-]{1,32}")

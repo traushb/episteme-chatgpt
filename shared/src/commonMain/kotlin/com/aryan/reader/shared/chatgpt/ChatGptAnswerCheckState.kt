@@ -8,6 +8,8 @@ data class SharedPdfAnswerCheckRequest(
     val book: BookItem,
     /** Index in the PDF itself, the key annotations are stored under. */
     val pdfPageIndex: Int,
+    /** Pages in the PDF itself (inserted blank pages not counted). */
+    val pdfPageCount: Int,
     val pageLabel: String,
     val password: String?,
     val annotations: List<SharedPdfAnnotation>,
@@ -29,6 +31,13 @@ data class SharedChatGptAnswerCheckState(
     /** The model stopped early (for example on an output limit); [text] is partial. */
     val isTruncated: Boolean = false,
     val modelName: String? = null,
+    /** The effort sent with the request; null when the model used its default. */
+    val reasoningEffort: String? = null,
+    /** 1-based numbers of the context pages sent with the current check. */
+    val contextPageNumbers: List<Int> = emptyList(),
+    /** Pages prepared so far, while [phase] is PREPARING. */
+    val preparedPages: Int = 0,
+    val pagesToPrepare: Int = 0,
 ) {
     val isVisible: Boolean get() = phase != SharedChatGptAnswerCheckPhase.IDLE
     val isBusy: Boolean
@@ -70,9 +79,15 @@ data class ChatGptConnectionState(
 class SharedPdfAnswerCheckHost(
     val state: SharedChatGptAnswerCheckState,
     val connection: ChatGptConnectionState,
+    /** The context saved for the book of the last check. */
+    val context: ChatGptAnswerCheckContextSetting,
+    /** Pages in that book, for the manual range. */
+    val pageCount: Int,
     val onCheck: (SharedPdfAnswerCheckRequest) -> Unit,
     /** Runs the last request again; after "no answers on this page" it checks anyway. */
     val onRetry: () -> Unit,
+    /** Saves the context for that book; it applies from the next check. */
+    val onContextChange: (ChatGptAnswerCheckContextSetting) -> Unit,
     val onSignIn: () -> Unit,
     val onDismiss: () -> Unit,
 )

@@ -3,10 +3,13 @@ package com.aryan.reader.shared.ios
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.aryan.reader.shared.BookItem
 import com.aryan.reader.shared.chatgpt.CHATGPT_MODELS_URL
 import com.aryan.reader.shared.chatgpt.CHATGPT_RESPONSES_URL
+import com.aryan.reader.shared.chatgpt.ChatGptAnswerCheckContextSetting
 import com.aryan.reader.shared.chatgpt.ChatGptConnectionState
 import com.aryan.reader.shared.chatgpt.ChatGptConnectionStatus
+import com.aryan.reader.shared.chatgpt.ChatGptContextPage
 import com.aryan.reader.shared.chatgpt.ChatGptFailure
 import com.aryan.reader.shared.chatgpt.ChatGptFailureKind
 import com.aryan.reader.shared.chatgpt.ChatGptModel
@@ -19,11 +22,22 @@ import com.aryan.reader.shared.chatgpt.SharedPdfAnswerCheckRequest
 import com.aryan.reader.shared.chatgpt.buildChatGptAnswerCheckPageContext
 import com.aryan.reader.shared.chatgpt.buildChatGptAnswerCheckRequestBody
 import com.aryan.reader.shared.chatgpt.chatGptAnswerCheckInstructions
-import com.aryan.reader.shared.chatgpt.chatGptAnswerCheckUserMessage
+import com.aryan.reader.shared.chatgpt.chatGptAnswerCheckUserContent
+import com.aryan.reader.shared.chatgpt.chatGptContextPageTextLimit
+import com.aryan.reader.shared.chatgpt.chatGptPageHasTextLayer
 import com.aryan.reader.shared.chatgpt.chooseChatGptModel
+import com.aryan.reader.shared.chatgpt.chooseChatGptReasoningEffort
 import com.aryan.reader.shared.chatgpt.classifyChatGptFailure
+import com.aryan.reader.shared.chatgpt.decodeChatGptAnswerCheckContextSetting
+import com.aryan.reader.shared.chatgpt.decodeChatGptReasoningEfforts
+import com.aryan.reader.shared.chatgpt.encodeChatGptReasoningEfforts
 import com.aryan.reader.shared.chatgpt.parseChatGptApiError
 import com.aryan.reader.shared.chatgpt.parseChatGptModelCatalog
+import com.aryan.reader.shared.ui.ANSWER_CHECK_CONTEXT_JPEG_QUALITY
+import com.aryan.reader.shared.ui.ANSWER_CHECK_CONTEXT_PAGE_LONG_SIDE_PX
+import com.aryan.reader.shared.ui.ANSWER_CHECK_JPEG_QUALITY
+import com.aryan.reader.shared.ui.ANSWER_CHECK_PAGE_LONG_SIDE_PX
+import com.aryan.reader.shared.ui.IosAnswerCheckPicture
 import com.aryan.reader.shared.ui.extractIosAnswerCheckPageText
 import com.aryan.reader.shared.ui.renderIosAnswerCheckPageJpeg
 import kotlin.io.encoding.Base64
@@ -39,14 +53,21 @@ import platform.Foundation.NSUserDefaults
 
 private const val CHATGPT_MODEL_DEFAULTS_KEY = "reader.chatgpt.answer_check_model.v1"
 
+/** JSON object of model slug to the reasoning effort chosen for it. */
+private const val CHATGPT_REASONING_EFFORTS_DEFAULTS_KEY = "reader.chatgpt.reasoning_effort.v1"
+
+/** Prefix of the per-book context setting; the book id follows. */
+private const val CHATGPT_CONTEXT_DEFAULTS_KEY_PREFIX = "reader.chatgpt.answer_check_context.v1."
+
 /** Coalesces streamed text into UI updates at most this often. */
 private const val STREAM_PUBLISH_INTERVAL_MS = 60L
 
 /**
  * Runs "Check my answers" for the iOS PDF reader: reads the page's printed
  * text and the reader's annotations, renders the page with their handwriting,
- * and streams ChatGPT's feedback into [state] using the token of the account
- * signed in with ChatGPT. One check runs at a time; a new one replaces it.
+ * adds the context pages saved for the book, and streams ChatGPT's feedback
+ * into [state] using the token of the account signed in with ChatGPT. One
+ * check runs at a time; a new one replaces it.
  */
 internal class IosChatGptAnswerCheckController(
     private val chatGpt: IosChatGptBridge,
@@ -56,11 +77,10 @@ internal class IosChatGptAnswerCheckController(
     private val appLanguageTag: () -> String?,
     private val defaults: NSUserDefaults = NSUserDefaults.standardUserDefaults,
     private val http: IosChatGptHttpTransport = IosChatGptUrlSessionTransport,
-    private val pageText: suspend (SharedPdfAnswerCheckRequest) -> String = { request ->
-        extractIosAnswerCheckPageText(request.book, request.pdfPageIndex, request.password)
-    },
-    private val pageJpeg: suspend (SharedPdfAnswerCheckRequest) -> ByteArray? = { request ->
-        renderIosAnswerCheckPageJpeg(request.book, request.pdfPageIndex, request.password, request.annotations)
+    private val pageText: suspend (book: BookItem, pdfPageIndex: Int, password: String?) -> String =
+        { book, pdfPageIndex, password -> extractIosAnswerCheckPageText(book, pdfPageIndex, password) },
+    private val pageJpeg: suspend (IosAnswerCheckPicture) -> ByteArray? = { picture ->
+        renderIosAnswerCheckPageJpeg(picture)
     },
 ) {
     var state by mutableStateOf(SharedChatGptAnswerCheckState())
@@ -73,6 +93,18 @@ internal class IosChatGptAnswerCheckController(
         private set
     var selectedModelSlug by mutableStateOf(defaults.stringForKey(CHATGPT_MODEL_DEFAULTS_KEY))
         private set
+
+    /** Reasoning effort chosen per model slug; a model without an entry uses its default. */
+    var reasoningEfforts by mutableStateOf(
+        decodeChatGptReasoningEfforts(defaults.stringForKey(CHATGPT_REASONING_EFFORTS_DEFAULTS_KEY))
+    )
+        private set
+
+    /** The context saved for the book of the last check. */
+    var contextSetting by mutableStateOf(ChatGptAnswerCheckContextSetting())
+        private set
+    private var contextBookId: String? = null
+    private var contextPageCount = 1
 
     private var job: Job? = null
     private var lastRequest: SharedPdfAnswerCheckRequest? = null
@@ -89,8 +121,11 @@ internal class IosChatGptAnswerCheckController(
         get() = SharedPdfAnswerCheckHost(
             state = state,
             connection = chatGpt.connection,
+            context = contextSetting,
+            pageCount = contextPageCount,
             onCheck = { request -> check(request, force = false) },
             onRetry = ::retry,
+            onContextChange = ::updateContext,
             onSignIn = ::signIn,
             onDismiss = ::dismiss,
         )
@@ -99,6 +134,13 @@ internal class IosChatGptAnswerCheckController(
         job?.cancel()
         lastRequest = request
         lastRequestForced = force
+        if (contextBookId != request.book.id) {
+            contextBookId = request.book.id
+            contextSetting = decodeChatGptAnswerCheckContextSetting(
+                defaults.stringForKey(CHATGPT_CONTEXT_DEFAULTS_KEY_PREFIX + request.book.id)
+            )
+        }
+        contextPageCount = request.pdfPageCount.coerceAtLeast(1)
         resumeAfterSignIn = false
         state = SharedChatGptAnswerCheckState(
             phase = SharedChatGptAnswerCheckPhase.PREPARING,
@@ -139,6 +181,20 @@ internal class IosChatGptAnswerCheckController(
         defaults.setObject(slug, forKey = CHATGPT_MODEL_DEFAULTS_KEY)
     }
 
+    /** [effort] null returns [slug] to its default: no effort is sent for it. */
+    fun selectReasoningEffort(slug: String, effort: String?) {
+        val updated = if (effort == null) reasoningEfforts - slug else reasoningEfforts + (slug to effort)
+        reasoningEfforts = updated
+        defaults.setObject(encodeChatGptReasoningEfforts(updated), forKey = CHATGPT_REASONING_EFFORTS_DEFAULTS_KEY)
+    }
+
+    /** Saves the context for the book of the last check; the next check uses it. */
+    fun updateContext(setting: ChatGptAnswerCheckContextSetting) {
+        val bookId = contextBookId ?: return
+        contextSetting = setting
+        defaults.setObject(setting.encode(), forKey = CHATGPT_CONTEXT_DEFAULTS_KEY_PREFIX + bookId)
+    }
+
     /** Loads the model catalog for the settings picker. */
     fun refreshModels() {
         if (isLoadingModels || !chatGpt.connection.isConnected) return
@@ -172,7 +228,12 @@ internal class IosChatGptAnswerCheckController(
 
     private suspend fun runCheck(request: SharedPdfAnswerCheckRequest, force: Boolean) {
         val bookTitle = request.book.title?.takeIf(String::isNotBlank) ?: request.book.displayName
-        val context = buildChatGptAnswerCheckPageContext(bookTitle, request.pageLabel, pageText(request), request.annotations)
+        val context = buildChatGptAnswerCheckPageContext(
+            bookTitle,
+            request.pageLabel,
+            pageText(request.book, request.pdfPageIndex, request.password),
+            request.annotations,
+        )
         if (!force && !context.hasStudentWork) {
             fail(ChatGptFailure(ChatGptFailureKind.NO_ANSWERS_ON_PAGE))
             return
@@ -193,18 +254,72 @@ internal class IosChatGptAnswerCheckController(
             fail(ChatGptFailure(ChatGptFailureKind.MODEL_UNAVAILABLE))
             return
         }
-        val pagePicture = pageJpeg(request)
+        val reasoningEffort = chooseChatGptReasoningEffort(model, reasoningEfforts[model.slug])
+        val setting = contextSetting
+        val contextIndices = setting.contextPageIndices(request.pdfPageIndex, request.pdfPageCount)
+        state = state.copy(preparedPages = 0, pagesToPrepare = contextIndices.size + 1)
+
+        // One page at a time: each picture is encoded and its raster freed
+        // before the next page is read, so a long context stays within the
+        // memory of older iPads.
+        val pagePicture = pageJpeg(
+            IosAnswerCheckPicture(
+                book = request.book,
+                pdfPageIndex = request.pdfPageIndex,
+                password = request.password,
+                annotations = request.annotations,
+                longSidePx = ANSWER_CHECK_PAGE_LONG_SIDE_PX,
+                jpegQuality = ANSWER_CHECK_JPEG_QUALITY,
+            )
+        )?.let(::jpegDataUrl)
         if (pagePicture == null && context.pageText.isBlank()) {
             fail(ChatGptFailure(ChatGptFailureKind.PAGE_RENDER_FAILED))
             return
         }
+        state = state.copy(preparedPages = 1)
+        val textLimit = chatGptContextPageTextLimit(contextIndices.size)
+        val contextPages = contextIndices.mapNotNull { pageIndex ->
+            val text = pageText(request.book, pageIndex, request.password).trim()
+            val hasTextLayer = chatGptPageHasTextLayer(text)
+            // Pages without a text layer only exist as pictures.
+            val picture = if (setting.includeImages || !hasTextLayer) {
+                pageJpeg(
+                    IosAnswerCheckPicture(
+                        book = request.book,
+                        pdfPageIndex = pageIndex,
+                        password = request.password,
+                        annotations = emptyList(),
+                        longSidePx = ANSWER_CHECK_CONTEXT_PAGE_LONG_SIDE_PX,
+                        jpegQuality = ANSWER_CHECK_CONTEXT_JPEG_QUALITY,
+                    )
+                )?.let(::jpegDataUrl)
+            } else {
+                null
+            }
+            state = state.copy(preparedPages = state.preparedPages + 1)
+            if (!hasTextLayer && picture == null) {
+                iosChatGptLog("context.page_skipped page=${pageIndex + 1}")
+                return@mapNotNull null
+            }
+            ChatGptContextPage(
+                pageNumber = pageIndex + 1,
+                text = if (hasTextLayer) text.take(textLimit) else "",
+                isTextShortened = hasTextLayer && text.length > textLimit,
+                imageDataUrl = picture,
+            )
+        }
         val body = buildChatGptAnswerCheckRequestBody(
             model = model.slug,
             instructions = chatGptAnswerCheckInstructions(replyLanguageName()),
-            userText = chatGptAnswerCheckUserMessage(context, hasPageImage = pagePicture != null),
-            pageImageDataUrl = pagePicture?.let(::jpegDataUrl),
+            content = chatGptAnswerCheckUserContent(context, pagePicture, contextPages),
+            reasoningEffort = reasoningEffort,
         )
-        state = state.copy(phase = SharedChatGptAnswerCheckPhase.ANALYZING, modelName = model.displayName)
+        state = state.copy(
+            phase = SharedChatGptAnswerCheckPhase.ANALYZING,
+            modelName = model.displayName,
+            reasoningEffort = reasoningEffort,
+            contextPageNumbers = contextPages.map { it.pageNumber },
+        )
         streamAnswerCheck(token, body)
     }
 
@@ -263,9 +378,9 @@ internal class IosChatGptAnswerCheckController(
 
         val failure = when {
             status !in 200..299 && status != 0 -> {
-                val code = parseChatGptApiError(errorBody.toString()).code
-                iosChatGptLog("responses.http_error status=$status code=$code")
-                classifyChatGptFailure(status, code)
+                val error = parseChatGptApiError(errorBody.toString())
+                iosChatGptLog("responses.http_error status=$status code=${error.code} param=${error.param}")
+                classifyChatGptFailure(status, error.code, error.param)
             }
             streamFailure != null -> streamFailure
             status == 0 -> ChatGptFailure(ChatGptFailureKind.NETWORK)

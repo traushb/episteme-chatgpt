@@ -102,34 +102,88 @@ class ChatGptAnswerCheckPromptTest {
     }
 
     @Test
-    fun `user message carries page text, notes and the picture hint`() {
-        val context = ChatGptAnswerCheckPageContext(
-            bookTitle = "Logic",
-            pageLabel = "7",
-            pageText = "1. Symbolize the sentence.",
-            typedNotes = listOf(ChatGptTypedNote("P -> Q", "top left (5% from left, 10% from top)")),
-            highlightedPassages = listOf("(b)"),
-            attachedNotes = emptyList(),
-            inkStrokeCount = 3,
-        )
-        val message = chatGptAnswerCheckUserMessage(context, hasPageImage = true)
+    fun `instructions keep context pages for conditions and forbid guessing`() {
+        val instructions = chatGptAnswerCheckInstructions("English")
+        assertTrue("Check only the answers on the page to check." in instructions)
+        assertTrue("Never check, grade or comment on anything written on a context page." in instructions)
+        assertTrue("Do not guess or invent missing conditions" in instructions)
+        assertTrue("❓ when the given material is not enough to judge it" in instructions)
+    }
 
-        assertTrue("Book: Logic" in message)
-        assertTrue("Page: 7" in message)
-        assertTrue("\"\"\"\n1. Symbolize the sentence.\n\"\"\"" in message)
-        assertTrue("- At the top left (5% from left, 10% from top): \"P -> Q\"" in message)
-        assertTrue("- \"(b)\"" in message)
-        assertTrue("Handwritten strokes on the page: 3." in message)
-        assertFalse("Comments the student attached" in message)
+    private val pageSeven = ChatGptAnswerCheckPageContext(
+        bookTitle = "Logic",
+        pageLabel = "7",
+        pageText = "1. Symbolize the sentence.",
+        typedNotes = listOf(ChatGptTypedNote("P -> Q", "top left (5% from left, 10% from top)")),
+        highlightedPassages = listOf("(b)"),
+        attachedNotes = emptyList(),
+        inkStrokeCount = 3,
+    )
+
+    @Test
+    fun `message lists labelled context pages first and the page to check last`() {
+        val parts = chatGptAnswerCheckUserContent(
+            current = pageSeven,
+            currentPageImageDataUrl = "data:image/jpeg;base64,PAGE",
+            contextPages = listOf(
+                ChatGptContextPage(pageNumber = 5, text = "Rule 5: modus ponens.", imageDataUrl = "data:image/jpeg;base64,P5"),
+                ChatGptContextPage(pageNumber = 6, text = "Exercise statements", isTextShortened = true),
+            ),
+        )
+
+        assertEquals(
+            listOf("text", "text", "image", "text", "text", "image", "text"),
+            parts.map { if (it is ChatGptInputPart.Image) "image" else "text" },
+        )
+        val texts = parts.filterIsInstance<ChatGptInputPart.Text>().map { it.text }
+        assertTrue("Book: Logic" in texts[0])
+        assertTrue("Page to check: 7 (it comes last)." in texts[0])
+        assertTrue("Context pages (statements and rules only, not to be checked): 5–6." in texts[0])
+        assertTrue(texts[1].startsWith("=== Context page 5: statements and rules only, do not check ==="))
+        assertTrue("\"\"\"\nRule 5: modus ponens.\n\"\"\"" in texts[1])
+        assertTrue(texts[1].endsWith("Picture of page 5:"))
+        assertTrue("Printed text of page 6, shortened:" in texts[2])
+        assertFalse("Picture of page 6" in texts[2])
+        assertTrue(texts[3].startsWith("=== Page 7: the page to check ==="))
+        assertTrue("\"\"\"\n1. Symbolize the sentence.\n\"\"\"" in texts[3])
+        assertTrue("- At the top left (5% from left, 10% from top): \"P -> Q\"" in texts[3])
+        assertTrue("- \"(b)\"" in texts[3])
+        assertTrue("Handwritten strokes on the page: 3. The next picture shows this page" in texts[3])
+        assertFalse("Comments the student attached" in texts[3])
+        assertEquals("Check only the student's answers on page 7.", texts[4])
+        assertEquals(
+            listOf("data:image/jpeg;base64,P5", "data:image/jpeg;base64,PAGE"),
+            parts.filterIsInstance<ChatGptInputPart.Image>().map { it.dataUrl },
+        )
     }
 
     @Test
-    fun `user message without a text layer points at the picture`() {
-        val context = ChatGptAnswerCheckPageContext("", "", "", emptyList(), emptyList(), emptyList(), 0)
-        val withImage = chatGptAnswerCheckUserMessage(context, hasPageImage = true)
-        assertTrue("The page has no text layer; read the exercises from the picture." in withImage)
-        assertFalse("Book:" in withImage)
-        val withoutImage = chatGptAnswerCheckUserMessage(context, hasPageImage = false)
-        assertTrue("No picture of the page is attached" in withoutImage)
+    fun `pages without a text layer point at their pictures`() {
+        val bare = ChatGptAnswerCheckPageContext("", "", "", emptyList(), emptyList(), emptyList(), 0)
+        val parts = chatGptAnswerCheckUserContent(
+            current = bare,
+            currentPageImageDataUrl = null,
+            contextPages = listOf(ChatGptContextPage(pageNumber = 2, text = "", imageDataUrl = "data:image/jpeg;base64,P2")),
+        )
+        val texts = parts.filterIsInstance<ChatGptInputPart.Text>().map { it.text }
+        assertFalse("Book:" in texts[0])
+        assertTrue("Page 2 has no text layer; read it from its picture." in texts[1])
+        assertTrue("The page has no text layer; read the exercises from the picture." in texts[2])
+        assertTrue("No picture of this page is attached" in texts[2])
+
+        val alone = chatGptAnswerCheckUserContent(pageSeven, "data:image/jpeg;base64,PAGE", emptyList())
+        assertTrue("No context pages are included." in (alone.first() as ChatGptInputPart.Text).text)
+    }
+
+    @Test
+    fun `text layer and context text budget`() {
+        assertFalse(chatGptPageHasTextLayer("  12  "))
+        assertFalse(chatGptPageHasTextLayer(""))
+        assertTrue(chatGptPageHasTextLayer("1. Symbolize: if P then Q."))
+        assertEquals(8_000, chatGptContextPageTextLimit(0))
+        assertEquals(8_000, chatGptContextPageTextLimit(5))
+        assertEquals(6_000, chatGptContextPageTextLimit(10))
+        assertEquals(2_000, chatGptContextPageTextLimit(30))
+        assertEquals(1_500, chatGptContextPageTextLimit(100))
     }
 }

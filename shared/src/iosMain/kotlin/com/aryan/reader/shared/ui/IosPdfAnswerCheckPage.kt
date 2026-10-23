@@ -46,30 +46,54 @@ import platform.posix.memcpy
 import kotlin.math.roundToInt
 
 /**
- * Longest side of the page picture sent for an answer check. Large enough for
+ * Longest side of the picture of the page being checked. Large enough for
  * handwriting to survive the model's high-detail downscaling, small enough to
  * keep the upload (and the plan usage it costs) modest.
  */
-private const val ANSWER_CHECK_PAGE_LONG_SIDE_PX = 1600f
-private const val ANSWER_CHECK_JPEG_QUALITY = 85
+internal const val ANSWER_CHECK_PAGE_LONG_SIDE_PX = 1600
+internal const val ANSWER_CHECK_JPEG_QUALITY = 85
+
+/** Context pages only carry printed formulas and diagrams; a lighter picture is enough. */
+internal const val ANSWER_CHECK_CONTEXT_PAGE_LONG_SIDE_PX = 1280
+internal const val ANSWER_CHECK_CONTEXT_JPEG_QUALITY = 80
+
+/** One page picture to render for an answer check. */
+internal data class IosAnswerCheckPicture(
+    val book: BookItem,
+    val pdfPageIndex: Int,
+    val password: String?,
+    /** The reader's work drawn over the page; empty for context pages. */
+    val annotations: List<SharedPdfAnnotation>,
+    val longSidePx: Int,
+    val jpegQuality: Int,
+)
 
 /**
- * The page the reader sees, as a JPEG: the PDF page rendered on white with
- * the reader's ink strokes and highlights drawn on top by the same renderer
- * the page overlay uses. Typed text boxes are not drawn; they travel as text.
- * Null when the page cannot be rendered.
+ * The page as a JPEG: the PDF page rendered on white with the reader's ink
+ * strokes and highlights drawn on top by the same renderer the page overlay
+ * uses. Typed text boxes are not drawn; they travel as text. Null when the
+ * page cannot be rendered.
  */
-internal suspend fun renderIosAnswerCheckPageJpeg(
-    book: BookItem,
-    pdfPageIndex: Int,
-    password: String?,
-    annotations: List<SharedPdfAnnotation>,
-): ByteArray? {
+internal suspend fun renderIosAnswerCheckPageJpeg(picture: IosAnswerCheckPicture): ByteArray? {
     val page = IosPdfiumRuntime.withPdfium {
-        renderIosAnswerCheckPdfPage(book.path, pdfPageIndex, password)
+        renderIosAnswerCheckPdfPage(picture.book.path, picture.pdfPageIndex, picture.password, picture.longSidePx)
     } ?: return null
     return withContext(Dispatchers.Default) {
-        runCatching { composeIosAnswerCheckPage(page, annotations) }.getOrNull()
+        try {
+            runCatching {
+                if (picture.annotations.isEmpty()) {
+                    // Nothing to draw over it: encode the PDFium raster as it is
+                    // rather than holding a second full-size copy of it.
+                    page.image.encodeJpeg(picture.jpegQuality)
+                } else {
+                    composeIosAnswerCheckPage(page, picture.annotations, picture.jpegQuality)
+                }
+            }.getOrNull()
+        } finally {
+            // Native raster memory is otherwise only reclaimed by a later GC
+            // cycle; free it before the next page of the check is rendered.
+            page.image.close()
+        }
     }
 }
 
@@ -97,7 +121,12 @@ private class IosAnswerCheckRenderedPage(
     val height: Int,
 )
 
-private fun renderIosAnswerCheckPdfPage(path: String?, pageIndex: Int, password: String?): IosAnswerCheckRenderedPage? {
+private fun renderIosAnswerCheckPdfPage(
+    path: String?,
+    pageIndex: Int,
+    password: String?,
+    longSidePx: Int,
+): IosAnswerCheckRenderedPage? {
     val resolvedPath = path.resolveIosReadablePath() ?: return null
     if (!NSFileManager.defaultManager.fileExistsAtPath(resolvedPath)) return null
     val document = FPDF_LoadDocument(resolvedPath, password) ?: return null
@@ -107,7 +136,7 @@ private fun renderIosAnswerCheckPdfPage(path: String?, pageIndex: Int, password:
         try {
             val pageWidth = FPDF_GetPageWidthF(page).coerceAtLeast(1f)
             val pageHeight = FPDF_GetPageHeightF(page).coerceAtLeast(1f)
-            val scale = ANSWER_CHECK_PAGE_LONG_SIDE_PX / maxOf(pageWidth, pageHeight)
+            val scale = longSidePx.coerceIn(256, 4096) / maxOf(pageWidth, pageHeight)
             val width = (pageWidth * scale).roundToInt().coerceAtLeast(1)
             val height = (pageHeight * scale).roundToInt().coerceAtLeast(1)
             val bitmap = FPDFBitmap_Create(width, height, 1) ?: return null
@@ -140,6 +169,7 @@ private fun renderIosAnswerCheckPdfPage(path: String?, pageIndex: Int, password:
 private fun composeIosAnswerCheckPage(
     page: IosAnswerCheckRenderedPage,
     annotations: List<SharedPdfAnnotation>,
+    jpegQuality: Int,
 ): ByteArray? {
     val canvasSize = IntSize(page.width, page.height)
     val target = ImageBitmap(page.width, page.height)
@@ -165,7 +195,19 @@ private fun composeIosAnswerCheckPage(
             }
         }
     }
-    return Image.makeFromBitmap(target.asSkiaBitmap())
-        .encodeToData(EncodedImageFormat.JPEG, ANSWER_CHECK_JPEG_QUALITY)
-        ?.bytes
+    val composed = Image.makeFromBitmap(target.asSkiaBitmap())
+    return try {
+        composed.encodeJpeg(jpegQuality)
+    } finally {
+        composed.close()
+    }
+}
+
+private fun Image.encodeJpeg(quality: Int): ByteArray? {
+    val data = encodeToData(EncodedImageFormat.JPEG, quality) ?: return null
+    return try {
+        data.bytes
+    } finally {
+        data.close()
+    }
 }

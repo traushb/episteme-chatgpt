@@ -8,6 +8,12 @@ import kotlin.math.roundToInt
 
 /** Printed page text is the exercise statement; past this size it only costs plan usage. */
 const val CHATGPT_ANSWER_CHECK_MAX_PAGE_TEXT_CHARS = 12_000
+
+/** Text budget shared by all context pages of one check. */
+const val CHATGPT_CONTEXT_MAX_TEXT_CHARS = 60_000
+
+/** Below this many non-blank characters a page counts as having no text layer. */
+const val CHATGPT_MIN_TEXT_LAYER_CHARS = 16
 private const val MAX_NOTE_CHARS = 1_000
 private const val MAX_NOTES = 40
 
@@ -104,6 +110,24 @@ internal fun describePagePosition(bounds: PdfPageBounds?): String {
     return "$area ($leftPercent% from left, $topPercent% from top)"
 }
 
+/** Whether [text] is a real text layer rather than nothing or a stray page number. */
+fun chatGptPageHasTextLayer(text: String): Boolean = text.count { !it.isWhitespace() } >= CHATGPT_MIN_TEXT_LAYER_CHARS
+
+/** Characters of text each of [contextPageCount] context pages may send. */
+fun chatGptContextPageTextLimit(contextPageCount: Int): Int =
+    (CHATGPT_CONTEXT_MAX_TEXT_CHARS / contextPageCount.coerceAtLeast(1)).coerceIn(1_500, 8_000)
+
+/** A page sent only for its exercise statements and rules; nothing on it is checked. */
+data class ChatGptContextPage(
+    /** 1-based page number in the PDF. */
+    val pageNumber: Int,
+    /** The page's text layer, possibly shortened; empty when it has none. */
+    val text: String,
+    val isTextShortened: Boolean = false,
+    /** The page picture as a data URL, when one is sent. */
+    val imageDataUrl: String? = null,
+)
+
 /**
  * The tutor instructions. [responseLanguage] is an English language name
  * ("Russian"); the reply is written in it whatever language the book uses.
@@ -113,26 +137,84 @@ fun chatGptAnswerCheckInstructions(responseLanguage: String): String {
     return """
         You are a patient, rigorous tutor checking a student's work in a textbook.
 
-        You receive a picture of one textbook page. The student answered the exercises directly on the page: handwriting is drawn as coloured ink strokes over the printed page, highlighted passages appear as translucent colour, and typed notes are listed in the message with their position. The printed text of the page is included as extracted text; use it to read the exercises exactly, and use the picture for the student's handwriting, diagrams and symbols.
+        What you receive, each part labelled with its page number:
+        - The page to check: a picture of the textbook page with the student's work on it (handwriting drawn as coloured ink strokes, highlighted passages as translucent colour), the printed text extracted from the page, and the notes the student typed onto it with their position. Use the extracted text to read the exercises exactly, and the picture for the handwriting, diagrams and symbols.
+        - Possibly context pages, with their text and sometimes their picture. Context pages are only the source of the exercise statements, conditions, definitions, rules and examples that the page to check relies on.
+
+        Rules:
+        - Check only the answers on the page to check. Never check, grade or comment on anything written on a context page.
+        - Use the context pages to understand the exercises and the rules they apply, and name the page when you rely on one.
+        - If an exercise depends on a statement, table, rule or text that is neither on the page to check nor on a context page, say so for that exercise and name what is missing. Do not guess or invent missing conditions; check only what the given material allows. The student can include more pages or a page range in the app.
 
         How to check:
-        1. Find every exercise or question on the page that the student attempted. Treat a highlighted or circled option as the student's choice in multiple-choice tasks.
-        2. For each attempted exercise, give its number or a short paraphrase, transcribe the student's answer as you read it, and mark it ✅ correct, ⚠️ partially correct, or ❌ incorrect.
+        1. Find every exercise or question on the page to check that the student attempted. Treat a highlighted or circled option as the student's choice in multiple-choice tasks.
+        2. For each attempted exercise, give its number or a short paraphrase, transcribe the student's answer as you read it, and mark it ✅ correct, ⚠️ partially correct, ❌ incorrect, or ❓ when the given material is not enough to judge it.
         3. Explain each mistake briefly and show the correct reasoning and answer. Work carefully and step by step on formal tasks such as logic (validity, truth tables, derivations, symbolization, fallacies) and mathematics before you judge.
         4. If handwriting is illegible, say which part you cannot read instead of guessing.
         5. Do not grade exercises the student left blank; list them in one line at the end.
 
-        Format the reply in Markdown: start with one line stating how many attempted answers are correct, then one "###" heading per exercise with short bullet points, and finish with a short overall comment and one concrete tip. Do not copy the whole page text.
+        Format the reply in Markdown: start with one line stating how many attempted answers are correct, then one "###" heading per exercise with short bullet points, and finish with a short overall comment and one concrete tip. Do not copy page texts.
 
         Write the entire reply in $language. Keep formulas, symbols and quoted terms exactly as written on the page.
     """.trimIndent()
 }
 
-/** The text part of the user message; the page picture travels next to it. */
-fun chatGptAnswerCheckUserMessage(context: ChatGptAnswerCheckPageContext, hasPageImage: Boolean): String = buildString {
-    if (context.bookTitle.isNotEmpty()) appendLine("Book: ${context.bookTitle}")
-    if (context.pageLabel.isNotEmpty()) appendLine("Page: ${context.pageLabel}")
-    appendLine()
+/**
+ * The user message, in reading order: an overview, each context page (text,
+ * then its picture when sent) and last the page to check with its picture.
+ */
+fun chatGptAnswerCheckUserContent(
+    current: ChatGptAnswerCheckPageContext,
+    currentPageImageDataUrl: String?,
+    contextPages: List<ChatGptContextPage>,
+): List<ChatGptInputPart> = buildList {
+    val pageToCheck = current.pageLabel.ifEmpty { "?" }
+    add(
+        ChatGptInputPart.Text(
+            buildString {
+                if (current.bookTitle.isNotEmpty()) appendLine("Book: ${current.bookTitle}")
+                appendLine("Page to check: $pageToCheck (it comes last).")
+                if (contextPages.isEmpty()) {
+                    append("No context pages are included.")
+                } else {
+                    append("Context pages (statements and rules only, not to be checked): ")
+                    append(formatChatGptPageNumbers(contextPages.map { it.pageNumber }))
+                    append('.')
+                }
+            }
+        )
+    )
+    contextPages.forEach { page ->
+        add(
+            ChatGptInputPart.Text(
+                buildString {
+                    appendLine("=== Context page ${page.pageNumber}: statements and rules only, do not check ===")
+                    if (page.text.isNotEmpty()) {
+                        val shortened = if (page.isTextShortened) ", shortened" else ""
+                        appendLine("Printed text of page ${page.pageNumber}$shortened:")
+                        appendLine("\"\"\"")
+                        appendLine(page.text)
+                        append("\"\"\"")
+                    } else {
+                        append("Page ${page.pageNumber} has no text layer; read it from its picture.")
+                    }
+                    if (page.imageDataUrl != null) {
+                        appendLine()
+                        append("Picture of page ${page.pageNumber}:")
+                    }
+                }
+            )
+        )
+        page.imageDataUrl?.let { add(ChatGptInputPart.Image(it)) }
+    }
+    add(ChatGptInputPart.Text(chatGptPageToCheckText(current, hasPageImage = currentPageImageDataUrl != null)))
+    currentPageImageDataUrl?.let { add(ChatGptInputPart.Image(it)) }
+    add(ChatGptInputPart.Text("Check only the student's answers on page $pageToCheck."))
+}
+
+/** The page to check as text; its picture follows it. */
+private fun chatGptPageToCheckText(context: ChatGptAnswerCheckPageContext, hasPageImage: Boolean): String = buildString {
+    appendLine("=== Page ${context.pageLabel.ifEmpty { "?" }}: the page to check ===")
     if (context.pageText.isNotEmpty()) {
         appendLine("Printed text extracted from the page (it may be incomplete or out of reading order):")
         appendLine("\"\"\"")
@@ -158,9 +240,8 @@ fun chatGptAnswerCheckUserMessage(context: ChatGptAnswerCheckPageContext, hasPag
         appendLine()
     }
     if (hasPageImage) {
-        appendLine("Handwritten strokes on the page: ${context.inkStrokeCount}. The attached picture shows the page with the student's work.")
+        append("Handwritten strokes on the page: ${context.inkStrokeCount}. The next picture shows this page with the student's work.")
     } else {
-        appendLine("No picture of the page is attached; check the answers from the text above.")
+        append("No picture of this page is attached; check the answers from the text above.")
     }
-    append("Please check the student's answers on this page.")
 }

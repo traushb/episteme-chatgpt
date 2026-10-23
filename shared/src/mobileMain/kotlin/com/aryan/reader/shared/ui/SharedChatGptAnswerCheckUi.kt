@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Info
@@ -27,6 +28,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -39,15 +41,23 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.aryan.reader.shared.chatgpt.CHATGPT_CONTEXT_MAX_PAGES
+import com.aryan.reader.shared.chatgpt.CHATGPT_CONTEXT_PREVIOUS_PAGE_CHOICES
 import com.aryan.reader.shared.chatgpt.CHATGPT_USAGE_SETTINGS_URL
+import com.aryan.reader.shared.chatgpt.ChatGptAnswerCheckContextSetting
 import com.aryan.reader.shared.chatgpt.ChatGptConnectionState
 import com.aryan.reader.shared.chatgpt.ChatGptConnectionStatus
 import com.aryan.reader.shared.chatgpt.ChatGptFailure
 import com.aryan.reader.shared.chatgpt.ChatGptFailureKind
+import com.aryan.reader.shared.chatgpt.ChatGptContextRangeInput
 import com.aryan.reader.shared.chatgpt.ChatGptModel
 import com.aryan.reader.shared.chatgpt.SharedChatGptAnswerCheckPhase
 import com.aryan.reader.shared.chatgpt.SharedPdfAnswerCheckHost
+import com.aryan.reader.shared.chatgpt.chooseChatGptModel
+import com.aryan.reader.shared.chatgpt.formatChatGptPageNumbers
+import com.aryan.reader.shared.chatgpt.parseChatGptContextRange
 
 /**
  * The answer-check popup: ChatGPT's feedback on the current page streams in
@@ -76,7 +86,7 @@ fun SharedPdfAnswerCheckSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp)
-                .heightIn(min = 260.dp, max = 640.dp),
+                .heightIn(min = 260.dp, max = 760.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             when {
@@ -108,10 +118,17 @@ fun SharedPdfAnswerCheckSheet(
                         ttsBookTitle = bookTitle,
                         ttsChapterTitle = title,
                         showUsageBadge = false,
-                        progressMessage = if (state.phase == SharedChatGptAnswerCheckPhase.PREPARING) {
-                            readerString("chatgpt_answer_check_preparing", "Preparing the page…")
-                        } else {
+                        progressMessage = if (state.phase != SharedChatGptAnswerCheckPhase.PREPARING) {
                             readerString("chatgpt_answer_check_analyzing", "ChatGPT is checking your answers…")
+                        } else if (state.pagesToPrepare > 1) {
+                            readerString(
+                                "chatgpt_answer_check_preparing_pages",
+                                "Preparing pages… %1\$d of %2\$d",
+                                state.preparedPages.coerceAtMost(state.pagesToPrepare),
+                                state.pagesToPrepare,
+                            )
+                        } else {
+                            readerString("chatgpt_answer_check_preparing", "Preparing the page…")
                         },
                         modifier = Modifier.weight(1f, fill = false),
                     )
@@ -128,9 +145,200 @@ fun SharedPdfAnswerCheckSheet(
                     }
                 }
             }
-            SharedChatGptPlanFooter(connection = host.connection, modelName = state.modelName)
+            if (failure == null || !failure.needsSignIn) {
+                SharedChatGptContextControls(
+                    context = host.context,
+                    pageCount = host.pageCount,
+                    sentPageNumbers = state.contextPageNumbers,
+                    isBusy = state.isBusy,
+                    onContextChange = host.onContextChange,
+                    onCheckAgain = host.onRetry,
+                )
+            }
+            SharedChatGptPlanFooter(
+                connection = host.connection,
+                modelName = state.modelName,
+                reasoningEffort = state.reasoningEffort,
+            )
         }
     }
+}
+
+/**
+ * Which pages go with the check as context, saved for the book. A change
+ * applies from the next check; nothing is sent until the reader asks.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SharedChatGptContextControls(
+    context: ChatGptAnswerCheckContextSetting,
+    pageCount: Int,
+    sentPageNumbers: List<Int>,
+    isBusy: Boolean,
+    onContextChange: (ChatGptAnswerCheckContextSetting) -> Unit,
+    onCheckAgain: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    var editingRange by remember { mutableStateOf(false) }
+    var changedSinceCheck by remember { mutableStateOf(false) }
+    val savedRange = context.range
+    var rangeFirst by remember(savedRange) { mutableStateOf(savedRange?.first?.toString().orEmpty()) }
+    var rangeLast by remember(savedRange) { mutableStateOf(savedRange?.last?.toString().orEmpty()) }
+    var rangeProblem by remember { mutableStateOf<ChatGptContextRangeInput?>(null) }
+
+    fun change(setting: ChatGptAnswerCheckContextSetting) {
+        if (setting == context) return
+        onContextChange(setting)
+        changedSinceCheck = true
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+        SharedExposedDropdownMenuField(
+            expanded = expanded,
+            onExpandedChange = { expanded = it },
+            modifier = Modifier.fillMaxWidth(),
+            field = {
+                OutlinedTextField(
+                    value = if (savedRange != null) {
+                        readerString("chatgpt_context_range_value", "Pages %1\$d–%2\$d", savedRange.first, savedRange.last)
+                    } else {
+                        chatGptPreviousPagesLabel(context.previousPages)
+                    },
+                    onValueChange = {},
+                    readOnly = true,
+                    singleLine = true,
+                    label = { Text(readerString("chatgpt_context_label", "Context")) },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+        ) {
+            CHATGPT_CONTEXT_PREVIOUS_PAGE_CHOICES.forEach { count ->
+                DropdownMenuItem(
+                    text = { Text(chatGptPreviousPagesLabel(count)) },
+                    onClick = {
+                        expanded = false
+                        editingRange = false
+                        rangeProblem = null
+                        change(context.copy(previousPages = count, range = null))
+                    },
+                    trailingIcon = if (savedRange == null && context.previousPages == count) {
+                        { Icon(Icons.Default.Check, contentDescription = null) }
+                    } else {
+                        null
+                    },
+                )
+            }
+            DropdownMenuItem(
+                text = { Text(readerString("chatgpt_context_range", "Page range…")) },
+                onClick = {
+                    expanded = false
+                    editingRange = true
+                },
+                trailingIcon = if (savedRange != null) {
+                    { Icon(Icons.Default.Check, contentDescription = null) }
+                } else {
+                    null
+                },
+            )
+        }
+        if (editingRange || savedRange != null) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = rangeFirst,
+                    onValueChange = { rangeFirst = it.filter(Char::isDigit).take(6) },
+                    singleLine = true,
+                    label = { Text(readerString("chatgpt_context_range_first", "First page")) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = rangeLast,
+                    onValueChange = { rangeLast = it.filter(Char::isDigit).take(6) },
+                    singleLine = true,
+                    label = { Text(readerString("chatgpt_context_range_last", "Last page")) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    onClick = {
+                        when (val input = parseChatGptContextRange(rangeFirst, rangeLast, pageCount)) {
+                            is ChatGptContextRangeInput.Valid -> {
+                                rangeProblem = null
+                                editingRange = false
+                                change(context.copy(range = input.range))
+                            }
+                            else -> rangeProblem = input
+                        }
+                    },
+                ) {
+                    Text(readerString("chatgpt_context_range_apply", "Apply"))
+                }
+            }
+            when (rangeProblem) {
+                ChatGptContextRangeInput.OutOfBounds -> SharedChatGptNote(
+                    readerString("chatgpt_context_range_invalid", "Enter pages from 1 to %1\$d.", pageCount),
+                    isError = true,
+                )
+                ChatGptContextRangeInput.TooLong -> SharedChatGptNote(
+                    readerString(
+                        "chatgpt_context_range_too_long",
+                        "A range can hold up to %1\$d pages.",
+                        CHATGPT_CONTEXT_MAX_PAGES,
+                    ),
+                    isError = true,
+                )
+                else -> Unit
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                readerString(
+                    "chatgpt_context_images",
+                    "Also send pictures of context pages (formulas, diagrams)",
+                ),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f).padding(end = 8.dp),
+            )
+            Switch(
+                checked = context.includeImages,
+                onCheckedChange = { change(context.copy(includeImages = it)) },
+            )
+        }
+        Text(
+            if (sentPageNumbers.isNotEmpty()) {
+                readerString(
+                    "chatgpt_context_sent",
+                    "Context sent: pages %1\$s. Pages without a text layer go as pictures.",
+                    formatChatGptPageNumbers(sentPageNumbers),
+                )
+            } else {
+                readerString(
+                    "chatgpt_context_images_note",
+                    "Pages without a text layer always go as pictures.",
+                )
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (changedSinceCheck && !isBusy) {
+            TextButton(
+                onClick = {
+                    changedSinceCheck = false
+                    onCheckAgain()
+                },
+            ) {
+                Text(readerString("chatgpt_context_check_again", "Check again with this context"))
+            }
+        }
+    }
+}
+
+@Composable
+private fun chatGptPreviousPagesLabel(count: Int): String = if (count <= 0) {
+    readerString("chatgpt_context_current_only", "Current page only")
+} else {
+    readerString("chatgpt_context_previous", "Current page + %1\$d previous", count)
 }
 
 @Composable
@@ -224,11 +432,16 @@ private fun SharedChatGptNote(text: String, isError: Boolean) {
 }
 
 @Composable
-private fun SharedChatGptPlanFooter(connection: ChatGptConnectionState, modelName: String?) {
+private fun SharedChatGptPlanFooter(connection: ChatGptConnectionState, modelName: String?, reasoningEffort: String?) {
     val account = connection.accountLabel
     if (!connection.isConnected || account == null) return
-    val usage = if (modelName != null) {
-        readerString("chatgpt_footer_with_model", "%1\$s · ChatGPT plan of %2\$s", modelName, account)
+    val model = when {
+        modelName == null -> null
+        reasoningEffort != null -> "$modelName · ${chatGptReasoningEffortLabel(reasoningEffort)}"
+        else -> modelName
+    }
+    val usage = if (model != null) {
+        readerString("chatgpt_footer_with_model", "%1\$s · ChatGPT plan of %2\$s", model, account)
     } else {
         readerString("chatgpt_footer", "ChatGPT plan of %1\$s", account)
     }
@@ -278,7 +491,7 @@ private fun Color.isDarkSurface(): Boolean = (red * 0.299f + green * 0.587f + bl
 
 /**
  * The ChatGPT block of the AI settings screen: sign-in state, which model
- * checks answers, and where plan usage is managed.
+ * checks answers and how hard it reasons, and where plan usage is managed.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -287,9 +500,13 @@ fun SharedChatGptAccountSection(
     models: List<ChatGptModel>,
     selectedModelSlug: String?,
     isLoadingModels: Boolean,
+    /** Reasoning effort saved per model slug. */
+    reasoningEfforts: Map<String, String>,
     onSignIn: () -> Unit,
     onSignOut: () -> Unit,
     onSelectModel: (String) -> Unit,
+    /** Saves an effort for a model slug; null returns it to the model's default. */
+    onSelectReasoningEffort: (String, String?) -> Unit,
     onLoadModels: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -326,6 +543,13 @@ fun SharedChatGptAccountSection(
                         onSelectModel = onSelectModel,
                         onLoadModels = onLoadModels,
                     )
+                    chooseChatGptModel(models, selectedModelSlug)?.let { model ->
+                        SharedChatGptReasoningEffortPicker(
+                            model = model,
+                            savedEffort = reasoningEfforts[model.slug],
+                            onSelect = { effort -> onSelectReasoningEffort(model.slug, effort) },
+                        )
+                    }
                 } else {
                     SharedChatGptNote(
                         readerString(
@@ -442,6 +666,100 @@ private fun SharedChatGptModelPicker(
     }
 }
 
+/**
+ * Reasoning effort for the model that checks answers. Only the levels the
+ * account's catalog lists for that model are offered; "Default" sends no
+ * effort and lets the model use its own.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SharedChatGptReasoningEffortPicker(
+    model: ChatGptModel,
+    savedEffort: String?,
+    onSelect: (String?) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val available = model.reasoningEfforts
+    // A level the catalog no longer lists is not sent, so show it as the default.
+    val selected = savedEffort?.takeIf { it in available }
+    val defaultLabel = model.defaultReasoningEffort?.let { effort ->
+        readerString("chatgpt_reasoning_default_with_level", "Default (%1\$s)", chatGptReasoningEffortLabel(effort))
+    } ?: readerString("chatgpt_reasoning_default", "Default")
+    SharedExposedDropdownMenuField(
+        expanded = expanded,
+        onExpandedChange = { open -> expanded = open && available.isNotEmpty() },
+        modifier = Modifier.fillMaxWidth(),
+        field = {
+            OutlinedTextField(
+                value = selected?.let { chatGptReasoningEffortLabel(it) } ?: defaultLabel,
+                onValueChange = {},
+                readOnly = true,
+                enabled = available.isNotEmpty(),
+                singleLine = true,
+                label = { Text(readerString("chatgpt_reasoning_label", "Reasoning effort")) },
+                supportingText = if (available.isEmpty()) {
+                    {
+                        Text(
+                            readerString(
+                                "chatgpt_reasoning_unavailable",
+                                "This model lists no adjustable levels, so it uses its default.",
+                            )
+                        )
+                    }
+                } else {
+                    null
+                },
+                trailingIcon = if (available.isNotEmpty()) {
+                    { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) }
+                } else {
+                    null
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+    ) {
+        DropdownMenuItem(
+            text = { Text(defaultLabel) },
+            onClick = {
+                onSelect(null)
+                expanded = false
+            },
+            trailingIcon = if (selected == null) {
+                { Icon(Icons.Default.Check, contentDescription = null) }
+            } else {
+                null
+            },
+        )
+        available.forEach { effort ->
+            DropdownMenuItem(
+                text = { Text(chatGptReasoningEffortLabel(effort)) },
+                onClick = {
+                    onSelect(effort)
+                    expanded = false
+                },
+                trailingIcon = if (effort == selected) {
+                    { Icon(Icons.Default.Check, contentDescription = null) }
+                } else {
+                    null
+                },
+            )
+        }
+    }
+}
+
+/** The name of a `reasoning.effort` value; levels this app does not know show as sent. */
+@Composable
+internal fun chatGptReasoningEffortLabel(effort: String): String = when (effort) {
+    "none" -> readerString("chatgpt_reasoning_none", "None")
+    "minimal" -> readerString("chatgpt_reasoning_minimal", "Minimal")
+    "low" -> readerString("chatgpt_reasoning_low", "Low")
+    "medium" -> readerString("chatgpt_reasoning_medium", "Medium")
+    "high" -> readerString("chatgpt_reasoning_high", "High")
+    "xhigh" -> readerString("chatgpt_reasoning_xhigh", "Extra high")
+    "max" -> readerString("chatgpt_reasoning_max", "Maximum")
+    else -> effort.replaceFirstChar { it.uppercaseChar() }
+}
+
 @Composable
 internal fun chatGptFailureMessage(failure: ChatGptFailure): String {
     val message = when (failure.kind) {
@@ -469,6 +787,10 @@ internal fun chatGptFailureMessage(failure: ChatGptFailure): String {
         ChatGptFailureKind.UNSUPPORTED_REQUEST -> readerString(
             "chatgpt_error_unsupported",
             "ChatGPT could not process this request. Try another model in AI settings.",
+        )
+        ChatGptFailureKind.REASONING_EFFORT_REJECTED -> readerString(
+            "chatgpt_error_reasoning_rejected",
+            "ChatGPT did not accept the reasoning effort chosen for this model. Choose another level or Default in AI settings.",
         )
         ChatGptFailureKind.MODEL_UNAVAILABLE -> readerString(
             "chatgpt_error_model_unavailable",

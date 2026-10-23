@@ -1118,6 +1118,7 @@ fun SharedMobilePdfReaderHost(
                 SharedPdfAnswerCheckRequest(
                     book = book,
                     pdfPageIndex = pdfPage,
+                    pdfPageCount = pageCount,
                     pageLabel = "${pdfPage + 1}",
                     password = pdfPassword,
                     annotations = readerState.annotations.filter { it.pageIndex == pdfPage },

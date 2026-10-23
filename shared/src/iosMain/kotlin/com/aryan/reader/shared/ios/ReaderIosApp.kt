@@ -7136,9 +7136,11 @@ private fun ReaderIosApp(
                                 models = chatGptAnswerCheck.models,
                                 selectedModelSlug = chatGptAnswerCheck.selectedModelSlug,
                                 isLoadingModels = chatGptAnswerCheck.isLoadingModels,
+                                reasoningEfforts = chatGptAnswerCheck.reasoningEfforts,
                                 onSignIn = chatGptAnswerCheck::signIn,
                                 onSignOut = chatGptAnswerCheck::signOut,
                                 onSelectModel = chatGptAnswerCheck::selectModel,
+                                onSelectReasoningEffort = chatGptAnswerCheck::selectReasoningEffort,
                                 onLoadModels = chatGptAnswerCheck::refreshModels,
                             )
                         },

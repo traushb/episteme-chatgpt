@@ -3,6 +3,7 @@ package com.aryan.reader.shared.chatgpt
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -19,8 +20,10 @@ class ChatGptResponsesApiTest {
             buildChatGptAnswerCheckRequestBody(
                 model = "gpt-test",
                 instructions = "Check the answers.",
-                userText = "Page 3",
-                pageImageDataUrl = "data:image/jpeg;base64,AAAA",
+                content = listOf(
+                    ChatGptInputPart.Text("Page 3"),
+                    ChatGptInputPart.Image("data:image/jpeg;base64,AAAA"),
+                ),
             )
         ).jsonObject
 
@@ -41,12 +44,86 @@ class ChatGptResponsesApiTest {
     }
 
     @Test
-    fun `request body without a page picture sends text only`() {
+    fun `request body keeps the order of text and picture parts`() {
         val body = Json.parseToJsonElement(
-            buildChatGptAnswerCheckRequestBody("gpt-test", "i", "u", pageImageDataUrl = null)
+            buildChatGptAnswerCheckRequestBody(
+                "gpt-test",
+                "i",
+                listOf(
+                    ChatGptInputPart.Text("context"),
+                    ChatGptInputPart.Image("data:image/jpeg;base64,CTX"),
+                    ChatGptInputPart.Text("page"),
+                ),
+            )
         ).jsonObject
-        val content = body["input"]!!.jsonArray.single().jsonObject["content"]!!.jsonArray
-        assertEquals(listOf("input_text"), content.map { it.jsonObject.string("type") })
+        val content = body["input"]!!.jsonArray.single().jsonObject["content"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("input_text", "input_image", "input_text"), content.map { it.string("type") })
+        assertEquals(listOf("context", null, "page"), content.map { it.string("text") })
+    }
+
+    @Test
+    fun `reasoning effort is sent only when one is chosen`() {
+        fun body(effort: String?) = Json.parseToJsonElement(
+            buildChatGptAnswerCheckRequestBody("gpt-test", "i", listOf(ChatGptInputPart.Text("u")), reasoningEffort = effort)
+        ).jsonObject
+
+        assertFalse("reasoning" in body(null).keys)
+        val high = body("high")
+        assertEquals(setOf("model", "instructions", "input", "reasoning", "store", "stream"), high.keys)
+        assertEquals("high", high["reasoning"]!!.jsonObject.string("effort"))
+        val numeric = body("2048")["reasoning"]!!.jsonObject["effort"]!!.jsonPrimitive
+        assertFalse(numeric.isString)
+        assertEquals(2048, numeric.int)
+    }
+
+    @Test
+    fun `catalog levels decide which efforts a model offers`() {
+        val models = parseChatGptModelCatalog(
+            """
+            {"models":[
+              {"slug":"gpt-a","display_name":"GPT A","visibility":"list","default_reasoning_level":"medium",
+               "supported_reasoning_levels":[{"effort":"low","description":"Fast"},{"effort":"medium","description":"Balanced"},
+                 {"effort":"high","description":"Deep"},{"effort":"low","description":"Duplicate"},{"effort":"Not Valid!"}]},
+              {"slug":"gpt-b","display_name":"GPT B","visibility":"list","supported_reasoning_levels":["minimal","xhigh",7]},
+              {"slug":"gpt-c","display_name":"GPT C","visibility":"list","supported_reasoning_levels":[]}
+            ]}
+            """.trimIndent()
+        )!!
+
+        assertEquals(listOf("low", "medium", "high"), models[0].reasoningEfforts)
+        assertEquals("medium", models[0].defaultReasoningEffort)
+        assertEquals(listOf("minimal", "xhigh", "7"), models[1].reasoningEfforts)
+        assertNull(models[1].defaultReasoningEffort)
+        assertEquals(emptyList(), models[2].reasoningEfforts)
+    }
+
+    @Test
+    fun `only an effort the catalog still lists is sent`() {
+        val model = ChatGptModel("gpt-a", "GPT A", reasoningEfforts = listOf("low", "high"))
+        assertEquals("high", chooseChatGptReasoningEffort(model, "high"))
+        assertNull(chooseChatGptReasoningEffort(model, "xhigh"))
+        assertNull(chooseChatGptReasoningEffort(model, null))
+        assertNull(chooseChatGptReasoningEffort(ChatGptModel("gpt-b", "GPT B"), "high"))
+    }
+
+    @Test
+    fun `efforts per model survive storage and junk is dropped`() {
+        val saved = mapOf("gpt-a" to "high", "gpt-b" to "minimal")
+        assertEquals(saved, decodeChatGptReasoningEfforts(encodeChatGptReasoningEfforts(saved)))
+        assertEquals(mapOf("gpt-a" to "low"), decodeChatGptReasoningEfforts("""{"gpt-a":"low","gpt-b":"Bad Value","gpt-c":{}}"""))
+        assertEquals(emptyMap(), decodeChatGptReasoningEfforts(null))
+        assertEquals(emptyMap(), decodeChatGptReasoningEfforts("not json"))
+    }
+
+    @Test
+    fun `a rejected reasoning effort is told apart from other bad requests`() {
+        val error = parseChatGptApiError(
+            """{"error":{"message":"Unsupported value","type":"invalid_request_error","param":"reasoning.effort","code":"unsupported_value"}}"""
+        )
+        assertEquals("reasoning.effort", error.param)
+        assertEquals(ChatGptFailureKind.REASONING_EFFORT_REJECTED, classifyChatGptFailure(400, error.code, error.param).kind)
+        assertEquals(ChatGptFailureKind.UNSUPPORTED_REQUEST, classifyChatGptFailure(400, error.code, "input").kind)
+        assertEquals(ChatGptFailureKind.RATE_LIMITED, classifyChatGptFailure(429, null, "reasoning.effort").kind)
     }
 
     @Test
@@ -201,6 +278,7 @@ class ChatGptResponsesApiTest {
             """.trimIndent()
         )
         assertEquals(listOf(ChatGptModel("gpt-a", "GPT A"), ChatGptModel("gpt-b", "gpt-b")), models)
+        assertTrue(models!!.all { it.reasoningEfforts.isEmpty() && it.defaultReasoningEffort == null })
     }
 
     @Test
