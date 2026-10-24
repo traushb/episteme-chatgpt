@@ -5,44 +5,28 @@ package com.aryan.reader.shared.ui
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Canvas
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asComposeImageBitmap
 import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
-import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import com.aryan.reader.shared.BookItem
 import com.aryan.reader.shared.ios.resolveIosReadablePath
+import com.aryan.reader.shared.pdf.IosPdfRenderEnginePreference
 import com.aryan.reader.shared.pdf.IosPdfTextPage
 import com.aryan.reader.shared.pdf.IosPdfiumRuntime
 import com.aryan.reader.shared.pdf.PdfAnnotationKind
 import com.aryan.reader.shared.pdf.SharedPdfAnnotation
 import com.aryan.reader.shared.pdf.SharedPdfInkRenderer
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_Create
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_Destroy
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_FillRect
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_GetBuffer
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_GetStride
-import com.aryan.reader.shared.pdfium.c.FPDF_CloseDocument
-import com.aryan.reader.shared.pdfium.c.FPDF_ClosePage
-import com.aryan.reader.shared.pdfium.c.FPDF_GetPageCount
-import com.aryan.reader.shared.pdfium.c.FPDF_GetPageHeightF
-import com.aryan.reader.shared.pdfium.c.FPDF_GetPageWidthF
-import com.aryan.reader.shared.pdfium.c.FPDF_LoadDocument
-import com.aryan.reader.shared.pdfium.c.FPDF_LoadPage
-import com.aryan.reader.shared.pdfium.c.FPDF_RenderPageBitmap
-import kotlinx.cinterop.addressOf
-import kotlinx.cinterop.convert
-import kotlinx.cinterop.usePinned
+import com.aryan.reader.shared.pdf.renderBitmap
+import com.aryan.reader.shared.pdf.valueOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.jetbrains.skia.ColorAlphaType
-import org.jetbrains.skia.ColorType
+import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.EncodedImageFormat
 import org.jetbrains.skia.Image
-import org.jetbrains.skia.ImageInfo
 import platform.Foundation.NSFileManager
-import platform.posix.memcpy
 import kotlin.math.roundToInt
 
 /**
@@ -75,16 +59,15 @@ internal data class IosAnswerCheckPicture(
  * page cannot be rendered.
  */
 internal suspend fun renderIosAnswerCheckPageJpeg(picture: IosAnswerCheckPicture): ByteArray? {
-    val page = IosPdfiumRuntime.withPdfium {
-        renderIosAnswerCheckPdfPage(picture.book.path, picture.pdfPageIndex, picture.password, picture.longSidePx)
-    } ?: return null
+    val page = renderIosAnswerCheckPdfPage(picture.book.path, picture.pdfPageIndex, picture.password, picture.longSidePx)
+        ?: return null
     return withContext(Dispatchers.Default) {
         try {
             runCatching {
                 if (picture.annotations.isEmpty()) {
-                    // Nothing to draw over it: encode the PDFium raster as it is
+                    // Nothing to draw over it: encode the page raster as it is
                     // rather than holding a second full-size copy of it.
-                    page.image.encodeJpeg(picture.jpegQuality)
+                    page.encodeJpeg(picture.jpegQuality)
                 } else {
                     composeIosAnswerCheckPage(page, picture.annotations, picture.jpegQuality)
                 }
@@ -92,7 +75,7 @@ internal suspend fun renderIosAnswerCheckPageJpeg(picture: IosAnswerCheckPicture
         } finally {
             // Native raster memory is otherwise only reclaimed by a later GC
             // cycle; free it before the next page of the check is rendered.
-            page.image.close()
+            page.close()
         }
     }
 }
@@ -115,59 +98,30 @@ internal suspend fun extractIosAnswerCheckPageText(
     }
 }
 
-private class IosAnswerCheckRenderedPage(
-    val image: Image,
-    val width: Int,
-    val height: Int,
-)
-
-private fun renderIosAnswerCheckPdfPage(
+/**
+ * The page on white by the reader's PDF engine, so the picture shows exactly
+ * what the reader saw under their ink: the same engine and flags as the page
+ * renders.
+ */
+private suspend fun renderIosAnswerCheckPdfPage(
     path: String?,
     pageIndex: Int,
     password: String?,
     longSidePx: Int,
-): IosAnswerCheckRenderedPage? {
+): Bitmap? {
     val resolvedPath = path.resolveIosReadablePath() ?: return null
     if (!NSFileManager.defaultManager.fileExistsAtPath(resolvedPath)) return null
-    val document = FPDF_LoadDocument(resolvedPath, password) ?: return null
-    try {
-        if (pageIndex !in 0 until FPDF_GetPageCount(document)) return null
-        val page = FPDF_LoadPage(document, pageIndex) ?: return null
-        try {
-            val pageWidth = FPDF_GetPageWidthF(page).coerceAtLeast(1f)
-            val pageHeight = FPDF_GetPageHeightF(page).coerceAtLeast(1f)
-            val scale = longSidePx.coerceIn(256, 4096) / maxOf(pageWidth, pageHeight)
-            val width = (pageWidth * scale).roundToInt().coerceAtLeast(1)
-            val height = (pageHeight * scale).roundToInt().coerceAtLeast(1)
-            val bitmap = FPDFBitmap_Create(width, height, 1) ?: return null
-            try {
-                FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xFFFFFFFFu)
-                // Same flags as the reader's page renders, so the picture shows
-                // exactly what the reader saw under their ink.
-                FPDF_RenderPageBitmap(bitmap, page, 0, 0, width, height, 0, 0)
-                val buffer = FPDFBitmap_GetBuffer(bitmap) ?: return null
-                val stride = FPDFBitmap_GetStride(bitmap).coerceAtLeast(width * 4)
-                val pixels = ByteArray(stride * height)
-                pixels.usePinned { pinned -> memcpy(pinned.addressOf(0), buffer, pixels.size.convert()) }
-                val image = Image.makeRaster(
-                    ImageInfo(width, height, ColorType.BGRA_8888, ColorAlphaType.OPAQUE),
-                    pixels,
-                    stride,
-                )
-                return IosAnswerCheckRenderedPage(image, width, height)
-            } finally {
-                FPDFBitmap_Destroy(bitmap)
-            }
-        } finally {
-            FPDF_ClosePage(page)
-        }
-    } finally {
-        FPDF_CloseDocument(document)
-    }
+    return IosPdfRenderEnginePreference.engine.rasterizer.withPage(resolvedPath, password, pageIndex) { page ->
+        if (page.pageIndex != pageIndex) return@withPage null
+        val scale = longSidePx.coerceIn(256, 4096) / maxOf(page.width, page.height)
+        val width = (page.width * scale).roundToInt().coerceAtLeast(1)
+        val height = (page.height * scale).roundToInt().coerceAtLeast(1)
+        page.renderBitmap(width, height)
+    }.valueOrNull()
 }
 
 private fun composeIosAnswerCheckPage(
-    page: IosAnswerCheckRenderedPage,
+    page: Bitmap,
     annotations: List<SharedPdfAnnotation>,
     jpegQuality: Int,
 ): ByteArray? {
@@ -180,7 +134,7 @@ private fun composeIosAnswerCheckPage(
         canvas = Canvas(target),
         size = Size(page.width.toFloat(), page.height.toFloat()),
     ) {
-        drawImage(page.image.toComposeImageBitmap())
+        drawImage(page.asComposeImageBitmap())
         annotations.forEach { annotation ->
             when (annotation.kind) {
                 PdfAnnotationKind.HIGHLIGHT -> drawSharedPdfHighlightAnnotation(
@@ -209,5 +163,15 @@ private fun Image.encodeJpeg(quality: Int): ByteArray? {
         data.bytes
     } finally {
         data.close()
+    }
+}
+
+/** The bitmap is immutable, so the image shares its pixels instead of copying them. */
+private fun Bitmap.encodeJpeg(quality: Int): ByteArray? {
+    val image = Image.makeFromBitmap(this)
+    return try {
+        image.encodeJpeg(quality)
+    } finally {
+        image.close()
     }
 }

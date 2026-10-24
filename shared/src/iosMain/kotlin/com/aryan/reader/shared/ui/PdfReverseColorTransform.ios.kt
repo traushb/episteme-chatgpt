@@ -60,7 +60,17 @@ internal fun extractIosPdfImageRects(
     }
 }
 
-/** Applies a cached Okular transform to Pdfium's BGRA byte buffer. */
+/**
+ * Whether [transformIosPdfBitmapBytes] would change any pixel. When it would
+ * not, renders skip the byte array and draw straight into the Skia bitmap.
+ */
+internal fun iosPdfBitmapNeedsTransform(
+    mode: PdfReverseColorMode,
+    protectedRects: List<IosPdfImageRect>,
+    forceRgbTransform: Boolean = false,
+): Boolean = mode != PdfReverseColorMode.RGB || protectedRects.isNotEmpty() || forceRgbTransform
+
+/** Applies a cached Okular transform to a rendered BGRA byte buffer. */
 internal fun transformIosPdfBitmapBytes(
     bytes: ByteArray,
     stride: Int,
@@ -77,7 +87,7 @@ internal fun transformIosPdfBitmapBytes(
     // RGB is normally applied by the Compose color filter. When image colors
     // must be preserved, however, the renderer supplies protected rectangles
     // and the same channel-negative is baked into the unprotected pixels.
-    if (mode == PdfReverseColorMode.RGB && protectedRects.isEmpty() && !forceRgbTransform) return
+    if (!iosPdfBitmapNeedsTransform(mode, protectedRects, forceRgbTransform)) return
     val sourceRects = protectedRects.mapNotNull { rect ->
         val left = (((rect.left - targetOriginX).toFloat() / targetWidth.coerceAtLeast(1)) * width)
             .toInt().coerceIn(0, width)

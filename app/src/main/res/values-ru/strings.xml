@@ -928,6 +928,8 @@
     <string name="visual_options_remove_page_gap_desc">Применяется к вертикальному режиму чтения и развороту на 2 страницы.</string>
     <string name="visual_options_hide_page_number_overlay">Скрыть номер страницы</string>
     <string name="visual_options_hide_page_number_overlay_desc">Убирает маленькую метку с номером на каждой странице.</string>
+    <string name="visual_options_pdf_engine">Движок PDF</string>
+    <string name="visual_options_pdf_engine_desc">Библиотека, которая рисует страницы. Если страница выглядит неправильно, попробуйте другую. Текст, поиск и пометки работают одинаково с обеими.</string>
     <string name="visual_options_screen_orientation">Ориентация экрана</string>
     <string name="visual_options_screen_orientation_desc">Выберите, следует ли читалка системной ориентации или предпочитает книжную/альбомную, когда Android это позволяет.</string>
     <string name="tts_notification_channel_name">Синтез речи (TTS)</string>

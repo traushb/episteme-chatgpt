@@ -431,8 +431,13 @@ data class SharedPdfVisualOptionsLabels(
     val hidePageNumberOverlay: String,
     val hidePageNumberOverlayDescription: String,
     val rightToLeft: String = "",
-    val rightToLeftDescription: String = ""
+    val rightToLeftDescription: String = "",
+    val renderEngine: String = "",
+    val renderEngineDescription: String = ""
 )
+
+/** One choice of PDF engine, for platforms that offer more than one. */
+data class SharedPdfRenderEngineOption(val id: String, val label: String)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -454,6 +459,9 @@ fun SharedPdfVisualOptionsSheet(
     onShowBottomToolbarChange: (Boolean) -> Unit,
     rightToLeftPagination: Boolean = false,
     onRightToLeftPaginationChange: ((Boolean) -> Unit)? = null,
+    renderEngineOptions: List<SharedPdfRenderEngineOption> = emptyList(),
+    selectedRenderEngineId: String? = null,
+    onRenderEngineChange: ((String) -> Unit)? = null,
     maxSheetHeight: Dp,
     labels: SharedPdfVisualOptionsLabels,
     onDismiss: () -> Unit
@@ -529,6 +537,18 @@ fun SharedPdfVisualOptionsSheet(
             }
             SharedPdfVisualOptionSwitchRow(labels.hidePageNumberOverlay, labels.hidePageNumberOverlayDescription, !showPageNumberOverlay) {
                 onShowPageNumberOverlayChange(!it)
+            }
+            val selectedEngine = renderEngineOptions.firstOrNull { it.id == selectedRenderEngineId }
+            if (onRenderEngineChange != null && renderEngineOptions.size > 1 && selectedEngine != null) {
+                Spacer(Modifier.height(20.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(12.dp))
+                Text(labels.renderEngine, style = MaterialTheme.typography.titleMedium)
+                Text(labels.renderEngineDescription, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(12.dp))
+                SharedReaderOptionSegmentedControl(renderEngineOptions, selectedEngine, { onRenderEngineChange(it.id) }) {
+                    it.label
+                }
             }
         }
     }

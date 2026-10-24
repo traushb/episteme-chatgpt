@@ -68,6 +68,7 @@ kotlin {
         val mobiSdk = if (name.contains("Simulator", ignoreCase = true)) "iphonesimulator" else "iphoneos"
         val mobiRoot = layout.buildDirectory.dir("native/libmobi/$name")
         val libarchiveRoot = layout.buildDirectory.dir("native/libarchive/$name")
+        val mupdfRoot = layout.buildDirectory.dir("native/mupdf/$name")
         val buildMobiTask = tasks.register<Exec>("buildMobi${name.replaceFirstChar(Char::uppercaseChar)}") {
             val outputDirectory = mobiRoot.get().asFile
             inputs.files(
@@ -99,6 +100,24 @@ kotlin {
             commandLine(
                 "sh",
                 rootProject.file("scripts/build_ios_libarchive.sh").absolutePath,
+                mobiSdk,
+                "arm64",
+                outputDirectory.absolutePath
+            )
+            environment("DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer")
+        }
+        val buildMupdfTask = tasks.register<Exec>("buildMupdf${name.replaceFirstChar(Char::uppercaseChar)}") {
+            val outputDirectory = mupdfRoot.get().asFile
+            inputs.files(
+                project.file("src/nativeInterop/cinterop/reader_mupdf_bridge.c"),
+                project.file("src/nativeInterop/cinterop/reader_mupdf_bridge.h")
+            )
+            inputs.file(rootProject.file("scripts/build_ios_mupdf.sh"))
+            inputs.file(rootProject.file("third_party/mupdf/include/mupdf/fitz/version.h")).optional()
+            outputs.file(outputDirectory.resolve("libreadermupdf.a"))
+            commandLine(
+                "sh",
+                rootProject.file("scripts/build_ios_mupdf.sh").absolutePath,
                 mobiSdk,
                 "arm64",
                 outputDirectory.absolutePath
@@ -138,6 +157,20 @@ kotlin {
                     )
                     tasks.named(interopProcessingTaskName).configure {
                         dependsOn(buildLibarchiveTask)
+                    }
+                }
+                val mupdf by creating {
+                    defFile(project.file("src/nativeInterop/cinterop/mupdf.def"))
+                    compilerOpts("-I${project.file("src/nativeInterop/cinterop").absolutePath}")
+                    // Static link like libmobi. The archive is one prelinked
+                    // object that exports only the bridge's rmu_* functions
+                    // (see scripts/build_ios_mupdf.sh).
+                    extraOpts(
+                        "-libraryPath", mupdfRoot.get().asFile.absolutePath,
+                        "-staticLibrary", "libreadermupdf.a"
+                    )
+                    tasks.named(interopProcessingTaskName).configure {
+                        dependsOn(buildMupdfTask)
                     }
                 }
             }

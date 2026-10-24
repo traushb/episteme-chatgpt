@@ -4772,6 +4772,7 @@ fun SharedMobilePdfReaderHost(
             )
         }
         if (showReaderOptions) {
+            val renderEngineControl = sharedMobilePdfRenderEngineControl()
             // Android benchmark (PdfSettingsSheets.kt:150-214 PdfVisualOptionsSheet):
             // the shared sheet owns toolbar toggles + localized copy; the
             // right-to-left row is mobile-only (shown via the optional callback).
@@ -4834,6 +4835,9 @@ fun SharedMobilePdfReaderHost(
                     rightToLeftPagination = it
                     onReaderDefaultSettingsChange(readerDefaultSettings.copy(rightToLeftPagination = it))
                 },
+                renderEngineOptions = renderEngineControl?.options.orEmpty(),
+                selectedRenderEngineId = renderEngineControl?.selectedId,
+                onRenderEngineChange = renderEngineControl?.select,
                 maxSheetHeight = 680.dp,
                 labels = SharedPdfVisualOptionsLabels(
                     title = readerString("menu_visual_options", "Visual Options"),
@@ -4902,6 +4906,12 @@ fun SharedMobilePdfReaderHost(
                     rightToLeftDescription = readerString(
                         "visual_options_pdf_right_to_left",
                         "Use right-to-left page order and edge navigation."
+                    ),
+                    renderEngine = readerString("visual_options_pdf_engine", "PDF engine"),
+                    renderEngineDescription = readerString(
+                        "visual_options_pdf_engine_desc",
+                        "The library that draws the pages. If a page looks wrong, try the other one. " +
+                            "Text, search and annotations work the same with both."
                     ),
                 ),
                 onDismiss = { showReaderOptions = false }

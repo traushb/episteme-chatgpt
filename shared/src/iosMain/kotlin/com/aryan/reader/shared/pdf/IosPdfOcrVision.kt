@@ -2,22 +2,9 @@
 
 package com.aryan.reader.shared.pdf
 
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_Create
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_Destroy
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_FillRect
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_GetBuffer
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_GetStride
-import com.aryan.reader.shared.pdfium.c.FPDF_CloseDocument
-import com.aryan.reader.shared.pdfium.c.FPDF_ClosePage
-import com.aryan.reader.shared.pdfium.c.FPDF_GetPageCount
-import com.aryan.reader.shared.pdfium.c.FPDF_GetPageHeightF
-import com.aryan.reader.shared.pdfium.c.FPDF_GetPageWidthF
-import com.aryan.reader.shared.pdfium.c.FPDF_LoadDocument
-import com.aryan.reader.shared.pdfium.c.FPDF_LoadPage
-import com.aryan.reader.shared.pdfium.c.FPDF_RenderPageBitmap
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.autoreleasepool
-import kotlinx.cinterop.convert
+import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.useContents
 import kotlinx.cinterop.usePinned
 import kotlinx.coroutines.Dispatchers
@@ -46,7 +33,6 @@ import platform.Vision.VNRecognizedText
 import platform.Vision.VNRecognizeTextRequest
 import platform.Vision.VNRequest
 import platform.Vision.VNRequestTextRecognitionLevelAccurate
-import platform.posix.memcpy
 import kotlin.math.roundToInt
 import com.aryan.reader.shared.ios.resolveIosReadablePath
 
@@ -56,7 +42,7 @@ internal data class IosPdfOcrWord(
     val bounds: PdfPageBounds,
 )
 
-/** Platform implementation backed by Vision and PDFium page rendering. */
+/** Platform implementation backed by Vision and the reader's PDF engine. */
 internal suspend fun recognizeIosPdfPageWords(
     path: String?,
     pageIndex: Int,
@@ -67,45 +53,33 @@ internal suspend fun recognizeIosPdfPageWords(
     val resolvedPath = rawPath.resolveIosReadablePath() ?: rawPath
     if (!NSFileManager.defaultManager.fileExistsAtPath(resolvedPath)) return@withContext emptyList()
 
-    IosPdfiumRuntime.mutex.withLock {
-        IosPdfiumRuntime.ensureInitialized()
-        val document = FPDF_LoadDocument(resolvedPath, password) ?: return@withLock emptyList()
-        try {
-            val pageCount = FPDF_GetPageCount(document).coerceAtLeast(0)
-            if (pageIndex !in 0 until pageCount) return@withLock emptyList()
-            val page = FPDF_LoadPage(document, pageIndex) ?: return@withLock emptyList()
-            try {
-                val pageWidth = FPDF_GetPageWidthF(page).coerceAtLeast(1f)
-                val pageHeight = FPDF_GetPageHeightF(page).coerceAtLeast(1f)
-                val scale = (2048f / pageHeight).coerceIn(0.5f, 3f)
-                val width = (pageWidth * scale).roundToInt().coerceAtLeast(1)
-                val height = (pageHeight * scale).roundToInt().coerceAtLeast(1)
-                val bitmap = FPDFBitmap_Create(width, height, 1) ?: return@withLock emptyList()
-                try {
-                    FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xFFFFFFFFu)
-                    FPDF_RenderPageBitmap(bitmap, page, 0, 0, width, height, 0, 0)
-                    val buffer = FPDFBitmap_GetBuffer(bitmap) ?: return@withLock emptyList()
-                    val stride = FPDFBitmap_GetStride(bitmap).coerceAtLeast(width * 4)
-                    val pixels = ByteArray(stride * height)
-                    pixels.usePinned { pinned ->
-                        memcpy(pinned.addressOf(0), buffer, pixels.size.convert())
-                    }
-                    val image = autoreleasepool { pixels.toVisionImage(width, height, stride) }
-                        ?: return@withLock emptyList()
-                    autoreleasepool {
-                        recognizeIosPdfWords(image, recognitionLanguages)
-                    }
-                } finally {
-                    FPDFBitmap_Destroy(bitmap)
-                }
-            } finally {
-                FPDF_ClosePage(page)
-            }
-        } finally {
-            FPDF_CloseDocument(document)
+    // Only the render holds the engine. Vision takes seconds on a page, and
+    // while it held the PDF lock no other page could be drawn.
+    val picture = IosPdfRenderEnginePreference.engine.rasterizer.withPage(resolvedPath, password, pageIndex) { page ->
+        if (page.pageIndex != pageIndex) return@withPage null
+        val scale = (2048f / page.height).coerceIn(0.5f, 3f)
+        val width = (page.width * scale).roundToInt().coerceAtLeast(1)
+        val height = (page.height * scale).roundToInt().coerceAtLeast(1)
+        val stride = width * 4
+        val pixels = ByteArray(stride * height)
+        val rendered = pixels.usePinned { pinned ->
+            page.render(pinned.addressOf(0).reinterpret(), stride, width, height, 0, 0, width, height)
         }
+        if (rendered) IosPdfOcrPicture(pixels, width, height, stride) else null
+    }.valueOrNull() ?: return@withContext emptyList()
+    val image = autoreleasepool { picture.pixels.toVisionImage(picture.width, picture.height, picture.stride) }
+        ?: return@withContext emptyList()
+    autoreleasepool {
+        recognizeIosPdfWords(image, recognitionLanguages)
     }
 }
+
+private class IosPdfOcrPicture(
+    val pixels: ByteArray,
+    val width: Int,
+    val height: Int,
+    val stride: Int,
+)
 
 private data class IosPdfOcrCacheKey(
     val path: String,
@@ -343,7 +317,7 @@ internal fun persistIosPdfOcrLanguage(language: SharedPdfOcrLanguage) {
     IosPdfOcrLanguagePreferences.setLanguage(language)
 }
 
-private fun iosPdfFileRevision(path: String): String {
+internal fun iosPdfFileRevision(path: String): String {
     val attributes = NSFileManager.defaultManager.attributesOfItemAtPath(path.resolveIosReadablePath() ?: path, error = null)
     val size = (attributes?.get(NSFileSize) as? NSNumber)?.longLongValue ?: 0L
     val modified = attributes?.get(NSFileModificationDate)?.toString().orEmpty()

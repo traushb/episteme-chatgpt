@@ -8,8 +8,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.graphics.asComposeImageBitmap
 import com.aryan.reader.shared.BookItem
+import com.aryan.reader.shared.pdf.IosPdfRasterPage
+import com.aryan.reader.shared.pdf.IosPdfRasterResult
+import com.aryan.reader.shared.pdf.IosPdfRenderEngine
+import com.aryan.reader.shared.pdf.IosPdfRenderEnginePreference
 import com.aryan.reader.shared.pdf.PdfPageBounds
 import com.aryan.reader.shared.pdf.PdfReverseColorMode
 import com.aryan.reader.shared.pdf.PdfZoomTileRequest
@@ -17,49 +21,15 @@ import com.aryan.reader.shared.pdf.PDF_ZOOM_RENDER_SETTLE_MILLIS
 import com.aryan.reader.shared.pdf.PDF_ZOOM_TILE_CACHE_MAX_BYTES
 import com.aryan.reader.shared.pdf.PdfTileLruCache
 import com.aryan.reader.shared.pdf.planPdfZoomTiles
-import com.aryan.reader.shared.pdf.IosPdfiumRuntime
 import com.aryan.reader.shared.pdf.IosPdfOcrLanguagePreferences
 import com.aryan.reader.shared.pdf.IosPdfOcrPageCache
+import com.aryan.reader.shared.pdf.renderBitmap
+import com.aryan.reader.shared.pdf.valueOrNull
 import com.aryan.reader.shared.ios.IosPdfPerformanceMetrics
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_Create
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_Destroy
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_FillRect
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_GetBuffer
-import com.aryan.reader.shared.pdfium.c.FPDFBitmap_GetStride
-import com.aryan.reader.shared.pdfium.c.FPDF_CloseDocument
-import com.aryan.reader.shared.pdfium.c.FPDF_DOCUMENT
-import com.aryan.reader.shared.pdfium.c.FPDF_ClosePage
-import com.aryan.reader.shared.pdfium.c.FPDF_GetPageCount
-import com.aryan.reader.shared.pdfium.c.FPDF_GetLastError
-import com.aryan.reader.shared.pdfium.c.FPDF_GetPageHeightF
-import com.aryan.reader.shared.pdfium.c.FPDF_GetPageSizeByIndex
-import com.aryan.reader.shared.pdfium.c.FPDF_GetPageWidthF
-import com.aryan.reader.shared.pdfium.c.FPDF_LoadDocument
-import com.aryan.reader.shared.pdfium.c.FPDF_LoadPage
-import com.aryan.reader.shared.pdfium.c.FPDF_RenderPageBitmap
-import cnames.structs.fpdf_page_t__
-import kotlinx.cinterop.DoubleVar
-import kotlinx.cinterop.alloc
-import kotlinx.cinterop.allocArray
-import kotlinx.cinterop.addressOf
-import kotlinx.cinterop.convert
-import kotlinx.cinterop.memScoped
-import kotlinx.cinterop.get
-import kotlinx.cinterop.plus
-import kotlinx.cinterop.ptr
-import kotlinx.cinterop.useContents
-import kotlinx.cinterop.usePinned
-import kotlinx.cinterop.value
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import org.jetbrains.skia.ColorAlphaType
-import org.jetbrains.skia.ColorType
-import org.jetbrains.skia.Image
-import org.jetbrains.skia.ImageInfo
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSLock
-import platform.Foundation.NSURL
-import platform.posix.memcpy
 import kotlin.math.roundToInt
 import kotlin.time.TimeSource
 import kotlin.coroutines.coroutineContext
@@ -74,23 +44,24 @@ internal actual fun rememberSharedMobilePdfPageRender(
     reverseColorMode: PdfReverseColorMode,
     preserveImageColors: Boolean,
 ): SharedMobilePdfPageRender {
+    val engine = IosPdfRenderEnginePreference.engine
     // Start at the page's final size: a cached render, or a placeholder with the
     // page's own aspect ratio (see IosPdfPageAspectCache).
-    var render by remember(book.path, pageIndex, password, reverseColorMode, preserveImageColors) {
+    var render by remember(book.path, pageIndex, password, reverseColorMode, preserveImageColors, engine) {
         mutableStateOf(
-            IosPdfPageCache.get(book.path, pageIndex, password, reverseColorMode, preserveImageColors)
+            IosPdfPageCache.get(book.path, pageIndex, password, reverseColorMode, preserveImageColors, engine)
                 ?: SharedMobilePdfPageRender(aspectRatio = IosPdfPageAspectCache.aspectRatio(book.path, pageIndex))
         )
     }
 
-    LaunchedEffect(book.path, pageIndex, password, reverseColorMode, preserveImageColors) {
+    LaunchedEffect(book.path, pageIndex, password, reverseColorMode, preserveImageColors, engine) {
         if (render.bitmap != null) return@LaunchedEffect
-        val cached = IosPdfPageCache.get(book.path, pageIndex, password, reverseColorMode, preserveImageColors)
+        val cached = IosPdfPageCache.get(book.path, pageIndex, password, reverseColorMode, preserveImageColors, engine)
         if (cached != null) {
             render = cached
             return@LaunchedEffect
         }
-        val rendered = IosPdfiumRenderer.render(book.path, pageIndex, 1f, password, reverseColorMode, preserveImageColors)
+        val rendered = IosPdfPageRenderer.render(engine, book.path, pageIndex, password, reverseColorMode, preserveImageColors)
         if (rendered.bitmap != null) {
             IosPdfPageCache.put(
                 book.path,
@@ -98,6 +69,7 @@ internal actual fun rememberSharedMobilePdfPageRender(
                 password,
                 reverseColorMode,
                 preserveImageColors,
+                engine,
                 rendered,
             )
         }
@@ -115,15 +87,18 @@ internal actual fun rememberSharedMobilePdfPageThumbnail(
     reverseColorMode: PdfReverseColorMode,
     preserveImageColors: Boolean,
 ): SharedMobilePdfPageThumbnail {
-    var thumbnail by remember(book.path, pageIndex, password, reverseColorMode, preserveImageColors) {
-        mutableStateOf<SharedMobilePdfPageThumbnail?>(IosPdfThumbnailCache.get(book.path, pageIndex, password, reverseColorMode, preserveImageColors))
+    val engine = IosPdfRenderEnginePreference.engine
+    var thumbnail by remember(book.path, pageIndex, password, reverseColorMode, preserveImageColors, engine) {
+        mutableStateOf<SharedMobilePdfPageThumbnail?>(
+            IosPdfThumbnailCache.get(book.path, pageIndex, password, reverseColorMode, preserveImageColors, engine)
+        )
     }
 
-    LaunchedEffect(book.path, pageIndex, password, reverseColorMode, preserveImageColors) {
+    LaunchedEffect(book.path, pageIndex, password, reverseColorMode, preserveImageColors, engine) {
         if (thumbnail == null) {
-            thumbnail = IosPdfThumbnailCache.get(book.path, pageIndex, password, reverseColorMode, preserveImageColors)
-                ?: IosPdfiumRenderer.renderThumbnail(book.path, pageIndex, password, reverseColorMode, preserveImageColors)?.also { rendered ->
-                    IosPdfThumbnailCache.put(book.path, pageIndex, password, reverseColorMode, preserveImageColors, rendered)
+            thumbnail = IosPdfThumbnailCache.get(book.path, pageIndex, password, reverseColorMode, preserveImageColors, engine)
+                ?: IosPdfPageRenderer.renderThumbnail(engine, book.path, pageIndex, password, reverseColorMode, preserveImageColors)?.also { rendered ->
+                    IosPdfThumbnailCache.put(book.path, pageIndex, password, reverseColorMode, preserveImageColors, engine, rendered)
                 }
                 ?: SharedMobilePdfPageThumbnail()
         }
@@ -143,6 +118,7 @@ internal actual fun rememberSharedMobilePdfTileRenders(
     reverseColorMode: PdfReverseColorMode,
     preserveImageColors: Boolean,
 ): List<SharedMobilePdfTileRender> {
+    val engine = IosPdfRenderEnginePreference.engine
     var settledZoomScale by remember(book.path, pageIndex, password, reverseColorMode, preserveImageColors) { mutableStateOf(zoomScale) }
     var zoomIsSettling by remember(book.path, pageIndex, password, reverseColorMode, preserveImageColors) { mutableStateOf(false) }
     LaunchedEffect(zoomScale) {
@@ -154,8 +130,8 @@ internal actual fun rememberSharedMobilePdfTileRenders(
     val requests = remember(pageAspectRatio, settledZoomScale, visibleBounds) {
         visibleBounds?.let { planPdfZoomTiles(pageAspectRatio, settledZoomScale, it) }.orEmpty()
     }
-    var tiles by remember(book.path, pageIndex, password, reverseColorMode, preserveImageColors) { mutableStateOf<List<SharedMobilePdfTileRender>>(emptyList()) }
-    LaunchedEffect(book.path, pageIndex, requests, password, zoomIsSettling, reverseColorMode, preserveImageColors) {
+    var tiles by remember(book.path, pageIndex, password, reverseColorMode, preserveImageColors, engine) { mutableStateOf<List<SharedMobilePdfTileRender>>(emptyList()) }
+    LaunchedEffect(book.path, pageIndex, requests, password, zoomIsSettling, reverseColorMode, preserveImageColors, engine) {
         if (zoomIsSettling) return@LaunchedEffect
         if (requests.isEmpty()) {
             // Distinguishes "nothing to do" (unzoomed) from a starved planner
@@ -168,19 +144,19 @@ internal actual fun rememberSharedMobilePdfTileRenders(
             return@LaunchedEffect
         }
         val fetchStartedAt = TimeSource.Monotonic.markNow()
-        val cached = IosPdfTileCache.get(book, pageIndex, password, reverseColorMode, preserveImageColors, requests)
+        val cached = IosPdfTileCache.get(book, pageIndex, password, reverseColorMode, preserveImageColors, engine, requests)
         val cachedIds = cached.mapTo(mutableSetOf()) { it.request.id }
         val missing = requests.filterNot { it.id in cachedIds }
         if (missing.isEmpty()) {
             tiles = cached
             return@LaunchedEffect
         }
-        val rendered = IosPdfiumRenderer.renderTiles(book.path, pageIndex, missing, password, reverseColorMode, preserveImageColors)
+        val rendered = IosPdfPageRenderer.renderTiles(engine, book.path, pageIndex, missing, password, reverseColorMode, preserveImageColors)
         coroutineContext.ensureActive()
-        IosPdfTileCache.put(book, pageIndex, password, reverseColorMode, preserveImageColors, rendered)
+        IosPdfTileCache.put(book, pageIndex, password, reverseColorMode, preserveImageColors, engine, rendered)
         tiles = cached + rendered
         println(
-            "[PdfTiles] page=$pageIndex scale=$settledZoomScale " +
+            "[PdfTiles] page=$pageIndex scale=$settledZoomScale engine=${engine.id} " +
                 "requests=${requests.size} cached=${cached.size} rendered=${rendered.size} " +
                 "fetchMs=${fetchStartedAt.elapsedNow().inWholeMilliseconds}"
         )
@@ -209,11 +185,10 @@ private object IosPdfPageCache {
         password: String?,
         reverseColorMode: PdfReverseColorMode,
         preserveImageColors: Boolean,
+        engine: IosPdfRenderEngine,
     ): SharedMobilePdfPageRender? = lock.withLock {
-        entries.remove(key(path, pageIndex, password, reverseColorMode, preserveImageColors))
-            ?.also { cached ->
-                entries[key(path, pageIndex, password, reverseColorMode, preserveImageColors)] = cached
-            }
+        val entryKey = key(path, pageIndex, password, reverseColorMode, preserveImageColors, engine)
+        entries.remove(entryKey)?.also { cached -> entries[entryKey] = cached }
     }
 
     fun put(
@@ -222,10 +197,11 @@ private object IosPdfPageCache {
         password: String?,
         reverseColorMode: PdfReverseColorMode,
         preserveImageColors: Boolean,
+        engine: IosPdfRenderEngine,
         render: SharedMobilePdfPageRender,
     ) {
         lock.withLock {
-            val entryKey = key(path, pageIndex, password, reverseColorMode, preserveImageColors)
+            val entryKey = key(path, pageIndex, password, reverseColorMode, preserveImageColors, engine)
             entries.remove(entryKey)
             entries[entryKey] = render
             while (entries.size > MaxEntries) {
@@ -240,7 +216,8 @@ private object IosPdfPageCache {
         password: String?,
         reverseColorMode: PdfReverseColorMode,
         preserveImageColors: Boolean,
-    ): String = "${path.orEmpty()}|$pageIndex|${password.orEmpty()}|${reverseColorMode.id}|$preserveImageColors"
+        engine: IosPdfRenderEngine,
+    ): String = "${path.orEmpty()}|$pageIndex|${password.orEmpty()}|${reverseColorMode.id}|$preserveImageColors|${engine.id}"
 }
 
 /**
@@ -288,20 +265,6 @@ private object IosPdfPageAspectCache {
     }
 }
 
-/** 0 marks a page whose size PDFium could not read. */
-private fun readIosPdfPageAspectRatios(document: FPDF_DOCUMENT, pageCount: Int): FloatArray = memScoped {
-    val width = alloc<DoubleVar>()
-    val height = alloc<DoubleVar>()
-    FloatArray(pageCount) { index ->
-        val read = FPDF_GetPageSizeByIndex(document, index, width.ptr, height.ptr) != 0
-        if (read && width.value > 0.0 && height.value > 0.0) {
-            (width.value / height.value).toFloat().coerceIn(0.1f, 10f)
-        } else {
-            0f
-        }
-    }
-}
-
 private object IosPdfThumbnailCache {
     private const val MaxEntries = 96
     private val entries = LinkedHashMap<String, SharedMobilePdfPageThumbnail>()
@@ -309,17 +272,17 @@ private object IosPdfThumbnailCache {
 
     fun get(
         path: String?, pageIndex: Int, password: String?, reverseColorMode: PdfReverseColorMode,
-        preserveImageColors: Boolean,
+        preserveImageColors: Boolean, engine: IosPdfRenderEngine,
     ): SharedMobilePdfPageThumbnail? = lock.withLock {
-        entries[key(path, pageIndex, password, reverseColorMode, preserveImageColors)]
+        entries[key(path, pageIndex, password, reverseColorMode, preserveImageColors, engine)]
     }
 
     fun put(
         path: String?, pageIndex: Int, password: String?, reverseColorMode: PdfReverseColorMode,
-        preserveImageColors: Boolean, thumbnail: SharedMobilePdfPageThumbnail,
+        preserveImageColors: Boolean, engine: IosPdfRenderEngine, thumbnail: SharedMobilePdfPageThumbnail,
     ) {
         lock.withLock {
-            val key = key(path, pageIndex, password, reverseColorMode, preserveImageColors)
+            val key = key(path, pageIndex, password, reverseColorMode, preserveImageColors, engine)
             entries[key] = thumbnail
             while (entries.size > MaxEntries) {
                 entries.remove(entries.keys.first())
@@ -329,8 +292,8 @@ private object IosPdfThumbnailCache {
 
     private fun key(
         path: String?, pageIndex: Int, password: String?, reverseColorMode: PdfReverseColorMode,
-        preserveImageColors: Boolean,
-    ): String = "${path.orEmpty()}|$pageIndex|${password.orEmpty()}|${reverseColorMode.id}|$preserveImageColors"
+        preserveImageColors: Boolean, engine: IosPdfRenderEngine,
+    ): String = "${path.orEmpty()}|$pageIndex|${password.orEmpty()}|${reverseColorMode.id}|$preserveImageColors|${engine.id}"
 }
 
 private object IosPdfTileCache {
@@ -343,10 +306,11 @@ private object IosPdfTileCache {
         password: String?,
         reverseColorMode: PdfReverseColorMode,
         preserveImageColors: Boolean,
+        engine: IosPdfRenderEngine,
         requests: List<PdfZoomTileRequest>,
     ): List<SharedMobilePdfTileRender> = lock.withLock {
         requests.mapNotNull { request ->
-            val key = key(book, pageIndex, password, reverseColorMode, preserveImageColors, request)
+            val key = key(book, pageIndex, password, reverseColorMode, preserveImageColors, engine, request)
             entries.get(key)
         }
     }
@@ -357,11 +321,12 @@ private object IosPdfTileCache {
         password: String?,
         reverseColorMode: PdfReverseColorMode,
         preserveImageColors: Boolean,
+        engine: IosPdfRenderEngine,
         renders: List<SharedMobilePdfTileRender>,
     ) {
         lock.withLock {
             renders.forEach { render ->
-                val key = key(book, pageIndex, password, reverseColorMode, preserveImageColors, render.request)
+                val key = key(book, pageIndex, password, reverseColorMode, preserveImageColors, engine, render.request)
                 val bytes = render.request.widthPx.toLong() * render.request.heightPx * 4L
                 entries.put(key, render, bytes)
             }
@@ -374,325 +339,228 @@ private object IosPdfTileCache {
         password: String?,
         reverseColorMode: PdfReverseColorMode,
         preserveImageColors: Boolean,
+        engine: IosPdfRenderEngine,
         request: PdfZoomTileRequest,
     ) =
         "${book.path.orEmpty()}|${book.fileContentModifiedTimestamp}|$pageIndex|${password.orEmpty()}|" +
-            "${reverseColorMode.id}|$preserveImageColors|${request.fullWidthPx}x${request.fullHeightPx}|${request.id}"
+            "${reverseColorMode.id}|$preserveImageColors|${engine.id}|" +
+            "${request.fullWidthPx}x${request.fullHeightPx}|${request.id}"
 }
 
-private object IosPdfiumRenderer {
+/** Page, tile and thumbnail renders through the engine chosen in [IosPdfRenderEnginePreference]. */
+private object IosPdfPageRenderer {
     suspend fun renderTiles(
+        engine: IosPdfRenderEngine,
         path: String?,
         pageIndex: Int,
         requests: List<PdfZoomTileRequest>,
         password: String?,
         reverseColorMode: PdfReverseColorMode = PdfReverseColorMode.RGB,
         preserveImageColors: Boolean = false,
-    ): List<SharedMobilePdfTileRender> = IosPdfiumRuntime.withPdfium {
-        val resolvedPath = path.resolveIosReadablePath() ?: return@withPdfium emptyList()
-        if (!NSFileManager.defaultManager.fileExistsAtPath(resolvedPath)) return@withPdfium emptyList()
-        val document = FPDF_LoadDocument(resolvedPath, password) ?: return@withPdfium emptyList()
-        try {
-            val count = FPDF_GetPageCount(document)
-            if (count <= 0) return@withPdfium emptyList()
-            val page = FPDF_LoadPage(document, pageIndex.coerceIn(0, count - 1)) ?: return@withPdfium emptyList()
-            try {
-                val pageWidth = FPDF_GetPageWidthF(page).coerceAtLeast(1f)
-                val pageHeight = FPDF_GetPageHeightF(page).coerceAtLeast(1f)
-                val imageRects = if (preserveImageColors) {
-                    extractIosPdfImageRects(page, pageWidth, pageHeight, requests.firstOrNull()?.fullWidthPx ?: 0, requests.firstOrNull()?.fullHeightPx ?: 0)
-                } else {
-                    emptyList()
-                }
-                requests.mapNotNull { request -> renderTile(page, request, reverseColorMode, imageRects) }
-            } finally {
-                FPDF_ClosePage(page)
+    ): List<SharedMobilePdfTileRender> {
+        val resolvedPath = path.resolveIosReadablePath() ?: return emptyList()
+        if (!NSFileManager.defaultManager.fileExistsAtPath(resolvedPath)) return emptyList()
+        return engine.rasterizer.withPage(resolvedPath, password, pageIndex) { page ->
+            val first = requests.firstOrNull()
+            val imageRects = if (preserveImageColors && first != null) {
+                page.imageRects(first.fullWidthPx, first.fullHeightPx)
+            } else {
+                emptyList()
             }
-        } finally {
-            FPDF_CloseDocument(document)
-        }
+            requests.mapNotNull { request -> renderTile(page, request, reverseColorMode, imageRects) }
+        }.valueOrNull().orEmpty()
     }
 
     private fun renderTile(
-        page: kotlinx.cinterop.CPointer<fpdf_page_t__>,
+        page: IosPdfRasterPage,
         request: PdfZoomTileRequest,
         reverseColorMode: PdfReverseColorMode,
         imageRects: List<IosPdfImageRect>,
     ): SharedMobilePdfTileRender? {
         val renderStartedAt = TimeSource.Monotonic.markNow()
-        val bitmap = FPDFBitmap_Create(request.widthPx, request.heightPx, 1) ?: return null
-        return try {
-            FPDFBitmap_FillRect(bitmap, 0, 0, request.widthPx, request.heightPx, 0xFFFFFFFFu)
-            FPDF_RenderPageBitmap(
-                bitmap,
-                page,
-                -request.leftPx,
-                -request.topPx,
-                request.fullWidthPx,
-                request.fullHeightPx,
-                0,
-                0
-            )
-            val buffer = FPDFBitmap_GetBuffer(bitmap) ?: return null
-            val stride = FPDFBitmap_GetStride(bitmap).coerceAtLeast(request.widthPx * 4)
-            val bytes = ByteArray(stride * request.heightPx)
-            bytes.usePinned { pinned -> memcpy(pinned.addressOf(0), buffer, bytes.size.convert()) }
-            transformIosPdfBitmapBytes(
-                bytes,
-                stride,
-                request.widthPx,
-                request.heightPx,
-                reverseColorMode,
-                protectedRects = imageRects,
-                targetWidth = request.fullWidthPx,
-                targetHeight = request.fullHeightPx,
-                targetOriginX = request.leftPx,
-                targetOriginY = request.topPx,
-            )
-            val image = Image.makeRaster(
-                ImageInfo(request.widthPx, request.heightPx, ColorType.BGRA_8888, ColorAlphaType.OPAQUE),
-                bytes,
-                stride
-            ).toComposeImageBitmap()
-            val rendered = SharedMobilePdfTileRender(
-                request = request,
-                bitmap = image,
+        val transform = if (iosPdfBitmapNeedsTransform(reverseColorMode, imageRects)) {
+            { bytes: ByteArray, stride: Int ->
+                transformIosPdfBitmapBytes(
+                    bytes,
+                    stride,
+                    request.widthPx,
+                    request.heightPx,
+                    reverseColorMode,
+                    protectedRects = imageRects,
+                    targetWidth = request.fullWidthPx,
+                    targetHeight = request.fullHeightPx,
+                    targetOriginX = request.leftPx,
+                    targetOriginY = request.topPx,
+                )
+            }
+        } else {
+            null
+        }
+        val bitmap = page.renderBitmap(
+            fullWidth = request.fullWidthPx,
+            fullHeight = request.fullHeightPx,
+            left = request.leftPx,
+            top = request.topPx,
+            width = request.widthPx,
+            height = request.heightPx,
+            transform = transform,
+        ) ?: return null
+        val rendered = SharedMobilePdfTileRender(
+            request = request,
+            bitmap = bitmap.asComposeImageBitmap(),
+            rasterizedReverseColorMode = reverseColorMode.takeIf {
+                it != PdfReverseColorMode.RGB || imageRects.isNotEmpty()
+            },
+        )
+        IosPdfPerformanceMetrics.recordRender(
+            widthPx = request.widthPx,
+            heightPx = request.heightPx,
+            estimatedBytes = request.widthPx.toLong() * request.heightPx * 4L,
+            durationMillis = renderStartedAt.elapsedNow().inWholeMilliseconds,
+            tile = true,
+        )
+        return rendered
+    }
+
+    suspend fun render(
+        engine: IosPdfRenderEngine,
+        path: String?,
+        pageIndex: Int,
+        password: String?,
+        reverseColorMode: PdfReverseColorMode = PdfReverseColorMode.RGB,
+        preserveImageColors: Boolean = false,
+    ): SharedMobilePdfPageRender {
+        val resolvedPath = path.resolveIosReadablePath()
+        if (resolvedPath.isNullOrBlank()) {
+            return SharedMobilePdfPageRender(errorMessage = "PDF path is unavailable")
+        }
+        if (!NSFileManager.defaultManager.fileExistsAtPath(resolvedPath)) {
+            return SharedMobilePdfPageRender(errorMessage = "PDF file is missing: $resolvedPath")
+        }
+        val result = engine.rasterizer.withPage(resolvedPath, password, pageIndex) { page ->
+            if (!IosPdfPageAspectCache.covers(path, page.pageCount)) {
+                IosPdfPageAspectCache.put(path, page.documentAspectRatios())
+            }
+            val aspectRatio = (page.width / page.height).coerceIn(0.1f, 10f)
+            IosPdfPageAspectCache.update(path, page.pageIndex, aspectRatio)
+            val renderStartedAt = TimeSource.Monotonic.markNow()
+            val scale = MaxRenderedPageHeightPx / page.height
+            val bitmapWidth = (page.width * scale).roundToInt().coerceAtLeast(1)
+            val bitmapHeight = MaxRenderedPageHeightPx.roundToInt().coerceAtLeast(1)
+            val imageRects = if (preserveImageColors) {
+                page.imageRects(bitmapWidth, bitmapHeight)
+            } else {
+                emptyList()
+            }
+            val transform = if (iosPdfBitmapNeedsTransform(reverseColorMode, imageRects)) {
+                { bytes: ByteArray, stride: Int ->
+                    transformIosPdfBitmapBytes(
+                        bytes,
+                        stride,
+                        bitmapWidth,
+                        bitmapHeight,
+                        reverseColorMode,
+                        protectedRects = imageRects,
+                        targetWidth = bitmapWidth,
+                        targetHeight = bitmapHeight,
+                    )
+                }
+            } else {
+                null
+            }
+            val bitmap = page.renderBitmap(bitmapWidth, bitmapHeight, transform = transform)
+                ?: return@withPage SharedMobilePdfPageRender(
+                    pageCount = page.pageCount,
+                    errorMessage = "${engine.label} could not draw page ${page.pageIndex + 1}",
+                )
+            val rendered = SharedMobilePdfPageRender(
+                pageCount = page.pageCount,
+                aspectRatio = aspectRatio,
+                bitmap = bitmap.asComposeImageBitmap(),
                 rasterizedReverseColorMode = reverseColorMode.takeIf {
                     it != PdfReverseColorMode.RGB || imageRects.isNotEmpty()
                 },
             )
             IosPdfPerformanceMetrics.recordRender(
-                widthPx = request.widthPx,
-                heightPx = request.heightPx,
-                estimatedBytes = bytes.size.toLong(),
+                widthPx = bitmapWidth,
+                heightPx = bitmapHeight,
+                estimatedBytes = bitmapWidth.toLong() * bitmapHeight * 4L,
                 durationMillis = renderStartedAt.elapsedNow().inWholeMilliseconds,
-                tile = true,
+                tile = false,
             )
             rendered
-        } finally {
-            FPDFBitmap_Destroy(bitmap)
+        }
+        return when (result) {
+            is IosPdfRasterResult.Opened -> result.value
+            is IosPdfRasterResult.Failed -> SharedMobilePdfPageRender(
+                pageCount = result.pageCount.coerceAtLeast(1),
+                errorMessage = result.message,
+                openError = result.openError,
+            )
         }
     }
 
-    suspend fun render(
-        path: String?,
-        pageIndex: Int,
-        zoomScale: Float,
-        password: String?,
-        reverseColorMode: PdfReverseColorMode = PdfReverseColorMode.RGB,
-        preserveImageColors: Boolean = false,
-    ): SharedMobilePdfPageRender =
-        IosPdfiumRuntime.withPdfium {
-        val resolvedPath = path.resolveIosReadablePath()
-        if (resolvedPath.isNullOrBlank()) {
-            return@withPdfium SharedMobilePdfPageRender(errorMessage = "PDF path is unavailable")
-        }
-        if (!NSFileManager.defaultManager.fileExistsAtPath(resolvedPath)) {
-            return@withPdfium SharedMobilePdfPageRender(errorMessage = "PDF file is missing: $resolvedPath")
-        }
-
-        val document = FPDF_LoadDocument(resolvedPath, password)
-            ?: return@withPdfium SharedMobilePdfPageRender(
-                errorMessage = "Pdfium could not open this PDF",
-                openError = sharedMobilePdfOpenErrorForPdfiumCode(FPDF_GetLastError().toLong()),
-            )
-        try {
-                val pageCount = FPDF_GetPageCount(document)
-                if (pageCount <= 0) {
-                    return@withPdfium SharedMobilePdfPageRender(
-                        errorMessage = "Pdfium could not read pages from this document",
-                        openError = SharedMobilePdfOpenError.INVALID_DOCUMENT,
-                    )
-                }
-                if (!IosPdfPageAspectCache.covers(path, pageCount)) {
-                    IosPdfPageAspectCache.put(path, readIosPdfPageAspectRatios(document, pageCount))
-                }
-                val safePageIndex = pageIndex.coerceIn(0, pageCount - 1)
-                val page = FPDF_LoadPage(document, safePageIndex)
-                    ?: return@withPdfium SharedMobilePdfPageRender(
-                        pageCount = pageCount,
-                        errorMessage = "Pdfium could not load page ${safePageIndex + 1}"
-                    )
-                try {
-                    val pageWidth = FPDF_GetPageWidthF(page).coerceAtLeast(1f)
-                    val pageHeight = FPDF_GetPageHeightF(page).coerceAtLeast(1f)
-                    val aspectRatio = (pageWidth / pageHeight).coerceIn(0.1f, 10f)
-                    IosPdfPageAspectCache.update(path, safePageIndex, aspectRatio)
-                    val renderStartedAt = TimeSource.Monotonic.markNow()
-                    val targetHeight = MaxRenderedPageHeightPx
-                    val scale = targetHeight / pageHeight
-                    val bitmapWidth = (pageWidth * scale).roundToInt().coerceAtLeast(1)
-                    val bitmapHeight = targetHeight.roundToInt().coerceAtLeast(1)
-                    val bitmap = FPDFBitmap_Create(bitmapWidth, bitmapHeight, 1)
-                        ?: return@withPdfium SharedMobilePdfPageRender(
-                            pageCount = pageCount,
-                            errorMessage = "Pdfium could not allocate a page bitmap"
-                        )
-                    try {
-                        FPDFBitmap_FillRect(bitmap, 0, 0, bitmapWidth, bitmapHeight, 0xFFFFFFFFu)
-                        FPDF_RenderPageBitmap(
-                            bitmap,
-                            page,
-                            0,
-                            0,
-                            bitmapWidth,
-                            bitmapHeight,
-                            0,
-                            0
-                        )
-
-                        val buffer = FPDFBitmap_GetBuffer(bitmap)
-                            ?: return@withPdfium SharedMobilePdfPageRender(
-                                pageCount = pageCount,
-                                errorMessage = "Pdfium returned an empty page buffer"
-                            )
-                        val stride = FPDFBitmap_GetStride(bitmap).coerceAtLeast(bitmapWidth * 4)
-                        val byteCount = stride * bitmapHeight
-                        val bytes = ByteArray(byteCount)
-                        bytes.usePinned { pinned ->
-                            memcpy(pinned.addressOf(0), buffer, byteCount.convert())
-                        }
-                        val imageRects = if (preserveImageColors) {
-                            extractIosPdfImageRects(page, pageWidth, pageHeight, bitmapWidth, bitmapHeight)
-                        } else {
-                            emptyList()
-                        }
-                        transformIosPdfBitmapBytes(
-                            bytes,
-                            stride,
-                            bitmapWidth,
-                            bitmapHeight,
-                            reverseColorMode,
-                            protectedRects = imageRects,
-                            targetWidth = bitmapWidth,
-                            targetHeight = bitmapHeight,
-                        )
-                        val image = Image.makeRaster(
-                            ImageInfo(
-                                width = bitmapWidth,
-                                height = bitmapHeight,
-                                colorType = ColorType.BGRA_8888,
-                                alphaType = ColorAlphaType.OPAQUE
-                            ),
-                            bytes,
-                            stride
-                        ).toComposeImageBitmap()
-                        val rendered = SharedMobilePdfPageRender(
-                            pageCount = pageCount,
-                            aspectRatio = aspectRatio,
-                            bitmap = image,
-                            rasterizedReverseColorMode = reverseColorMode.takeIf {
-                                it != PdfReverseColorMode.RGB || imageRects.isNotEmpty()
-                            },
-                        )
-                        IosPdfPerformanceMetrics.recordRender(
-                            widthPx = bitmapWidth,
-                            heightPx = bitmapHeight,
-                            estimatedBytes = byteCount.toLong(),
-                            durationMillis = renderStartedAt.elapsedNow().inWholeMilliseconds,
-                            tile = false,
-                        )
-                        rendered
-                    } finally {
-                        FPDFBitmap_Destroy(bitmap)
-                    }
-                } finally {
-                    FPDF_ClosePage(page)
-                }
-            } finally {
-                FPDF_CloseDocument(document)
-            }
-        }
-
     suspend fun renderThumbnail(
+        engine: IosPdfRenderEngine,
         path: String?,
         pageIndex: Int,
         password: String?,
         reverseColorMode: PdfReverseColorMode = PdfReverseColorMode.RGB,
         preserveImageColors: Boolean = false,
-    ): SharedMobilePdfPageThumbnail? =
-        IosPdfiumRuntime.withPdfium {
-            val resolvedPath = path.resolveIosReadablePath() ?: return@withPdfium null
-            if (!NSFileManager.defaultManager.fileExistsAtPath(resolvedPath)) return@withPdfium null
-            val document = FPDF_LoadDocument(resolvedPath, password) ?: return@withPdfium null
-            try {
-                val count = FPDF_GetPageCount(document)
-                if (count <= 0) return@withPdfium null
-                val page = FPDF_LoadPage(document, pageIndex.coerceIn(0, count - 1)) ?: return@withPdfium null
-                try {
-                    val pageWidth = FPDF_GetPageWidthF(page).coerceAtLeast(1f)
-                    val pageHeight = FPDF_GetPageHeightF(page).coerceAtLeast(1f)
-                    val aspectRatio = (pageWidth / pageHeight).coerceIn(0.1f, 10f)
-                    val renderStartedAt = TimeSource.Monotonic.markNow()
-                    val scale = ThumbnailTargetWidthPx / pageWidth
-                    val bitmapWidth = (pageWidth * scale).roundToInt().coerceAtLeast(1)
-                    val bitmapHeight = (pageHeight * scale).roundToInt().coerceAtLeast(1)
-                    val bitmap = FPDFBitmap_Create(bitmapWidth, bitmapHeight, 1) ?: return@withPdfium null
-                    try {
-                        FPDFBitmap_FillRect(bitmap, 0, 0, bitmapWidth, bitmapHeight, 0xFFFFFFFFu)
-                        FPDF_RenderPageBitmap(bitmap, page, 0, 0, bitmapWidth, bitmapHeight, 0, 0)
-                        val buffer = FPDFBitmap_GetBuffer(bitmap) ?: return@withPdfium null
-                        val stride = FPDFBitmap_GetStride(bitmap).coerceAtLeast(bitmapWidth * 4)
-                        val byteCount = stride * bitmapHeight
-                        val bytes = ByteArray(byteCount)
-                        bytes.usePinned { pinned ->
-                            memcpy(pinned.addressOf(0), buffer, byteCount.convert())
-                        }
-                        val imageRects = if (preserveImageColors) {
-                            extractIosPdfImageRects(page, pageWidth, pageHeight, bitmapWidth, bitmapHeight)
-                        } else {
-                            emptyList()
-                        }
-                        transformIosPdfBitmapBytes(
-                            bytes,
-                            stride,
-                            bitmapWidth,
-                            bitmapHeight,
-                            reverseColorMode,
-                            protectedRects = imageRects,
-                            targetWidth = bitmapWidth,
-                            targetHeight = bitmapHeight,
-                            forceRgbTransform = false,
-                        )
-                        val image = Image.makeRaster(
-                            ImageInfo(
-                                width = bitmapWidth,
-                                height = bitmapHeight,
-                                colorType = ColorType.BGRA_8888,
-                                alphaType = ColorAlphaType.OPAQUE
-                            ),
-                            bytes,
-                            stride
-                        ).toComposeImageBitmap()
-                        // Match full-page renders: RGB is applied via Compose color
-                        // filter unless image colors are preserved (protected rects
-                        // bake the negative). Nonlinear modes are always baked.
-                        val rasterizedMode = reverseColorMode.takeIf {
-                            it != PdfReverseColorMode.RGB || imageRects.isNotEmpty()
-                        }
-                        val rendered = SharedMobilePdfPageThumbnail(
-                            bitmap = image,
-                            aspectRatio = aspectRatio,
-                            rasterizedReverseColorMode = rasterizedMode,
-                        )
-                        IosPdfPerformanceMetrics.recordRender(
-                            widthPx = bitmapWidth,
-                            heightPx = bitmapHeight,
-                            estimatedBytes = byteCount.toLong(),
-                            durationMillis = renderStartedAt.elapsedNow().inWholeMilliseconds,
-                            tile = false,
-                        )
-                        rendered
-                    } finally {
-                        FPDFBitmap_Destroy(bitmap)
-                    }
-                } finally {
-                    FPDF_ClosePage(page)
-                }
-            } finally {
-                FPDF_CloseDocument(document)
+    ): SharedMobilePdfPageThumbnail? {
+        val resolvedPath = path.resolveIosReadablePath() ?: return null
+        if (!NSFileManager.defaultManager.fileExistsAtPath(resolvedPath)) return null
+        return engine.rasterizer.withPage(resolvedPath, password, pageIndex) { page ->
+            val aspectRatio = (page.width / page.height).coerceIn(0.1f, 10f)
+            val renderStartedAt = TimeSource.Monotonic.markNow()
+            val scale = ThumbnailTargetWidthPx / page.width
+            val bitmapWidth = (page.width * scale).roundToInt().coerceAtLeast(1)
+            val bitmapHeight = (page.height * scale).roundToInt().coerceAtLeast(1)
+            val imageRects = if (preserveImageColors) {
+                page.imageRects(bitmapWidth, bitmapHeight)
+            } else {
+                emptyList()
             }
-        }
+            val transform = if (iosPdfBitmapNeedsTransform(reverseColorMode, imageRects)) {
+                { bytes: ByteArray, stride: Int ->
+                    transformIosPdfBitmapBytes(
+                        bytes,
+                        stride,
+                        bitmapWidth,
+                        bitmapHeight,
+                        reverseColorMode,
+                        protectedRects = imageRects,
+                        targetWidth = bitmapWidth,
+                        targetHeight = bitmapHeight,
+                        forceRgbTransform = false,
+                    )
+                }
+            } else {
+                null
+            }
+            val bitmap = page.renderBitmap(bitmapWidth, bitmapHeight, transform = transform)
+                ?: return@withPage null
+            // Match full-page renders: RGB is applied via Compose color
+            // filter unless image colors are preserved (protected rects
+            // bake the negative). Nonlinear modes are always baked.
+            val rasterizedMode = reverseColorMode.takeIf {
+                it != PdfReverseColorMode.RGB || imageRects.isNotEmpty()
+            }
+            val rendered = SharedMobilePdfPageThumbnail(
+                bitmap = bitmap.asComposeImageBitmap(),
+                aspectRatio = aspectRatio,
+                rasterizedReverseColorMode = rasterizedMode,
+            )
+            IosPdfPerformanceMetrics.recordRender(
+                widthPx = bitmapWidth,
+                heightPx = bitmapHeight,
+                estimatedBytes = bitmapWidth.toLong() * bitmapHeight * 4L,
+                durationMillis = renderStartedAt.elapsedNow().inWholeMilliseconds,
+                tile = false,
+            )
+            rendered
+        }.valueOrNull()
+    }
 }
 
 internal actual suspend fun sharedMobilePdfOcrTextBounds(

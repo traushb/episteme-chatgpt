@@ -4,7 +4,7 @@ name: iOS unsigned IPA
 # re-signing tool (Sideloadly, AltStore, SideStore). The native inputs that
 # are not in the repository are fetched from their upstream sources: PDFium
 # from bblanchon/pdfium-binaries (the build scripts expect that layout), and
-# libarchive/xz from their own repositories.
+# MuPDF, libarchive and xz from their own repositories.
 #
 # The app binary keeps its symbol table and the dSYMs are uploaded next to the
 # IPA, so device crash reports (.ips) can be read. Dispatching this workflow
@@ -101,6 +101,7 @@ jobs:
       PDFIUM_TAG: chromium/8066
       LIBARCHIVE_TAG: v3.8.1
       XZ_TAG: v5.8.1
+      MUPDF_TAG: 1.28.5
     steps:
       - uses: actions/checkout@v4
 
@@ -152,7 +153,7 @@ jobs:
           path: ~/.konan
           key: konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('gradle/libs.versions.toml') }}
 
-      - name: Fetch PDFium, libarchive and xz
+      - name: Fetch PDFium, MuPDF, libarchive and xz
         run: |
           set -euo pipefail
           for variant in ios-device-arm64 ios-simulator-arm64; do
@@ -163,6 +164,12 @@ jobs:
           done
           git clone --quiet --depth 1 --branch "$LIBARCHIVE_TAG" https://github.com/libarchive/libarchive.git third_party/libarchive
           git clone --quiet --depth 1 --branch "$XZ_TAG" https://github.com/tukaani-project/xz.git third_party/xz
+          # MuPDF draws the pages (scripts/build_ios_mupdf.sh). Only the bundled
+          # libraries that its PDF-only build compiles are fetched.
+          git clone --quiet --depth 1 --branch "$MUPDF_TAG" https://github.com/ArtifexSoftware/mupdf.git third_party/mupdf
+          git -C third_party/mupdf submodule --quiet update --init --depth 1 \
+            thirdparty/freetype thirdparty/jbig2dec thirdparty/lcms2 \
+            thirdparty/libjpeg thirdparty/openjpeg thirdparty/zlib
 
       - name: Build PDFium.xcframework
         run: |

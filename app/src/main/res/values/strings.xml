@@ -1042,6 +1042,8 @@
     <string name="visual_options_remove_page_gap_desc">Applies to vertical reading and two-page spreads.</string>
     <string name="visual_options_hide_page_number_overlay">Hide page number overlay</string>
     <string name="visual_options_hide_page_number_overlay_desc">Removes the small page count label from each page.</string>
+    <string name="visual_options_pdf_engine">PDF engine</string>
+    <string name="visual_options_pdf_engine_desc">The library that draws the pages. If a page looks wrong, try the other one. Text, search and annotations work the same with both.</string>
     <!-- "Status Bar" and "Navigation Bar" are standard Android UI terms — keep consistent with your OS locale if applicable. -->
     <string name="visual_options_system_ui">System UI (Status &amp; Navigation Bars)</string>
     <string name="visual_options_system_ui_desc">Control the visibility of the device\'s system bars.</string>
