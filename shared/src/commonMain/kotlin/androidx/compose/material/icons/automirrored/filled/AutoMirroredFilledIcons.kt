@@ -39,6 +39,9 @@ val Icons.AutoMirrored.Filled.OpenInNew: ImageVector
 val Icons.AutoMirrored.Filled.Redo: ImageVector
     get() = EpistemeAutoMirroredFilledIcons.redo
 
+val Icons.AutoMirrored.Filled.Send: ImageVector
+    get() = EpistemeAutoMirroredFilledIcons.send
+
 val Icons.AutoMirrored.Filled.Sort: ImageVector
     get() = EpistemeAutoMirroredFilledIcons.sort
 
@@ -185,6 +188,20 @@ private object EpistemeAutoMirroredFilledIcons {
             autoMirror = true,
             paths = listOf(
                 """M396,760Q299,760 229.5,697Q160,634 160,540Q160,446 229.5,383Q299,320 396,320L648,320L544,216L600,160L800,360L600,560L544,504L648,400L396,400Q333,400 286.5,440Q240,480 240,540Q240,600 286.5,640Q333,680 396,680L680,680L680,760L396,760Z"""
+            )
+        )
+    }
+
+    val send: ImageVector by lazy {
+        materialIcon(
+            name = "Send",
+            defaultWidth = 24f,
+            defaultHeight = 24f,
+            viewportWidth = 24f,
+            viewportHeight = 24f,
+            autoMirror = true,
+            paths = listOf(
+                """M2.01,21L23,12L2.01,3L2,10L17,12L2,14Z"""
             )
         )
     }

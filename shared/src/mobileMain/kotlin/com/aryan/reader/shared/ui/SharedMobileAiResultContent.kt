@@ -1,8 +1,10 @@
 package com.aryan.reader.shared.ui
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -84,6 +86,10 @@ fun SharedMobileAiResultContent(
     // Android parity (executeRecapLogic progress): staged recap status while
     // loading with blank text; null keeps the generic "Thinking…".
     progressMessage: String? = null,
+    /** Content that scrolls along under the result, such as follow-up questions. */
+    afterContent: (@Composable ColumnScope.() -> Unit)? = null,
+    /** The scroll state of the result when [afterContent] is set, so the host can follow new content. */
+    scrollState: ScrollState? = null,
     modifier: Modifier = Modifier
 ) {
     val popupTts = rememberSharedMobileEpubLocalTts()
@@ -215,14 +221,30 @@ fun SharedMobileAiResultContent(
                     style = MaterialTheme.typography.bodyLarge
                 )
             } else if (plainText.isNotBlank()) {
-                SharedMarkdownText(
-                    markdown = markdownText,
-                    style = MaterialTheme.typography.bodyLarge,
-                    highlightText = currentSpoken,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState())
-                )
+                if (afterContent == null) {
+                    SharedMarkdownText(
+                        markdown = markdownText,
+                        style = MaterialTheme.typography.bodyLarge,
+                        highlightText = currentSpoken,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(scrollState ?: rememberScrollState())
+                    ) {
+                        SharedMarkdownText(
+                            markdown = markdownText,
+                            style = MaterialTheme.typography.bodyLarge,
+                            highlightText = currentSpoken,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        afterContent()
+                    }
+                }
             } else if (emptyText != null) {
                 Text(emptyText, style = MaterialTheme.typography.bodyLarge)
             }

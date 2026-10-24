@@ -1974,4 +1974,7 @@
     <string name="chatgpt_reasoning_xhigh">Очень высокий</string>
     <string name="chatgpt_reasoning_max">Максимальный</string>
     <string name="chatgpt_error_reasoning_rejected">ChatGPT не принял выбранный для этой модели уровень рассуждения. Выберите другой уровень или «По умолчанию» в настройках AI.</string>
+    <string name="chatgpt_follow_up_hint">Задайте уточняющий вопрос…</string>
+    <string name="chatgpt_follow_up_send">Отправить</string>
+    <string name="chatgpt_follow_up_answering">ChatGPT отвечает…</string>
 </resources>

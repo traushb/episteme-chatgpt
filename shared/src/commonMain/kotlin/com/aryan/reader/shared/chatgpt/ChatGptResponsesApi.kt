@@ -121,16 +121,28 @@ sealed interface ChatGptInputPart {
     data class Image(val dataUrl: String) : ChatGptInputPart
 }
 
+/** A message after the first one of an answer-check conversation. */
+sealed interface ChatGptConversationMessage {
+    /** ChatGPT's earlier reply. */
+    data class Assistant(val text: String) : ChatGptConversationMessage
+
+    /** The reader's follow-up question. */
+    data class User(val text: String) : ChatGptConversationMessage
+}
+
 /**
- * Body for one answer-check request: a single user message whose parts are
- * the labelled page texts and pictures. [reasoningEffort] null leaves the
- * `reasoning` field out, which keeps the model's own default.
+ * Body for one answer-check request: a user message whose parts are the
+ * labelled page texts and pictures, then [conversation] for a follow-up
+ * question. Plan usage stores nothing (`store: false`), so every follow-up
+ * sends the pages and the whole conversation again. [reasoningEffort] null
+ * leaves the `reasoning` field out, which keeps the model's own default.
  */
 fun buildChatGptAnswerCheckRequestBody(
     model: String,
     instructions: String,
     content: List<ChatGptInputPart>,
     reasoningEffort: String? = null,
+    conversation: List<ChatGptConversationMessage> = emptyList(),
 ): String = buildJsonObject {
     put("model", JsonPrimitive(model))
     put("instructions", JsonPrimitive(instructions))
@@ -156,6 +168,25 @@ fun buildChatGptAnswerCheckRequestBody(
                 }
             })
         })
+        conversation.forEach { message ->
+            add(buildJsonObject {
+                when (message) {
+                    is ChatGptConversationMessage.Assistant -> {
+                        put("role", JsonPrimitive("assistant"))
+                        put("content", JsonPrimitive(message.text))
+                    }
+                    is ChatGptConversationMessage.User -> {
+                        put("role", JsonPrimitive("user"))
+                        put("content", buildJsonArray {
+                            add(buildJsonObject {
+                                put("type", JsonPrimitive("input_text"))
+                                put("text", JsonPrimitive(message.text))
+                            })
+                        })
+                    }
+                }
+            })
+        }
     })
     if (reasoningEffort != null) {
         put("reasoning", buildJsonObject {

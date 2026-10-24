@@ -4,14 +4,19 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.aryan.reader.shared.BookItem
+import com.aryan.reader.shared.chatgpt.CHATGPT_FOLLOW_UP_MAX_CHARS
 import com.aryan.reader.shared.chatgpt.CHATGPT_MODELS_URL
 import com.aryan.reader.shared.chatgpt.CHATGPT_RESPONSES_URL
 import com.aryan.reader.shared.chatgpt.ChatGptAnswerCheckContextSetting
 import com.aryan.reader.shared.chatgpt.ChatGptConnectionState
 import com.aryan.reader.shared.chatgpt.ChatGptConnectionStatus
 import com.aryan.reader.shared.chatgpt.ChatGptContextPage
+import com.aryan.reader.shared.chatgpt.ChatGptConversationMessage
 import com.aryan.reader.shared.chatgpt.ChatGptFailure
 import com.aryan.reader.shared.chatgpt.ChatGptFailureKind
+import com.aryan.reader.shared.chatgpt.ChatGptFollowUp
+import com.aryan.reader.shared.chatgpt.ChatGptFollowUpStatus
+import com.aryan.reader.shared.chatgpt.ChatGptInputPart
 import com.aryan.reader.shared.chatgpt.ChatGptModel
 import com.aryan.reader.shared.chatgpt.ChatGptResponseStreamParser
 import com.aryan.reader.shared.chatgpt.ChatGptStreamEvent
@@ -24,6 +29,7 @@ import com.aryan.reader.shared.chatgpt.buildChatGptAnswerCheckRequestBody
 import com.aryan.reader.shared.chatgpt.chatGptAnswerCheckInstructions
 import com.aryan.reader.shared.chatgpt.chatGptAnswerCheckUserContent
 import com.aryan.reader.shared.chatgpt.chatGptContextPageTextLimit
+import com.aryan.reader.shared.chatgpt.chatGptFollowUpConversation
 import com.aryan.reader.shared.chatgpt.chatGptPageHasTextLayer
 import com.aryan.reader.shared.chatgpt.chooseChatGptModel
 import com.aryan.reader.shared.chatgpt.chooseChatGptReasoningEffort
@@ -107,6 +113,8 @@ internal class IosChatGptAnswerCheckController(
     private var contextPageCount = 1
 
     private var job: Job? = null
+    /** What the last check sent, kept for follow-up questions about it. */
+    private var conversation: AnswerCheckConversation? = null
     private var lastRequest: SharedPdfAnswerCheckRequest? = null
     private var lastRequestForced = false
     private var resumeAfterSignIn = false
@@ -126,12 +134,14 @@ internal class IosChatGptAnswerCheckController(
             onCheck = { request -> check(request, force = false) },
             onRetry = ::retry,
             onContextChange = ::updateContext,
+            onAskFollowUp = ::askFollowUp,
             onSignIn = ::signIn,
             onDismiss = ::dismiss,
         )
 
     fun check(request: SharedPdfAnswerCheckRequest, force: Boolean) {
         job?.cancel()
+        conversation = null
         lastRequest = request
         lastRequestForced = force
         if (contextBookId != request.book.id) {
@@ -172,8 +182,24 @@ internal class IosChatGptAnswerCheckController(
     fun dismiss() {
         job?.cancel()
         job = null
+        conversation = null
         resumeAfterSignIn = false
         state = SharedChatGptAnswerCheckState()
+    }
+
+    /**
+     * Asks ChatGPT about the finished check. The pages, the check and the
+     * earlier answered questions go with it, since plan usage keeps nothing
+     * between requests.
+     */
+    fun askFollowUp(question: String) {
+        val text = question.trim().take(CHATGPT_FOLLOW_UP_MAX_CHARS)
+        val base = conversation ?: return
+        if (text.isEmpty() || !state.canAskFollowUp) return
+        val earlier = state.followUps
+        val messages = chatGptFollowUpConversation(state.text, earlier, text)
+        state = state.copy(followUps = earlier + ChatGptFollowUp(question = text))
+        job = scope.launch { runFollowUp(base, messages, index = earlier.size) }
     }
 
     fun selectModel(slug: String) {
@@ -308,12 +334,19 @@ internal class IosChatGptAnswerCheckController(
                 imageDataUrl = picture,
             )
         }
-        val body = buildChatGptAnswerCheckRequestBody(
+        val base = AnswerCheckConversation(
             model = model.slug,
             instructions = chatGptAnswerCheckInstructions(replyLanguageName()),
             content = chatGptAnswerCheckUserContent(context, pagePicture, contextPages),
             reasoningEffort = reasoningEffort,
         )
+        val body = buildChatGptAnswerCheckRequestBody(
+            model = base.model,
+            instructions = base.instructions,
+            content = base.content,
+            reasoningEffort = base.reasoningEffort,
+        )
+        conversation = base
         state = state.copy(
             phase = SharedChatGptAnswerCheckPhase.ANALYZING,
             modelName = model.displayName,
@@ -324,6 +357,65 @@ internal class IosChatGptAnswerCheckController(
     }
 
     private suspend fun streamAnswerCheck(token: String, body: String) {
+        val outcome = streamResponse(token, body) { text -> state = state.copy(text = text) }
+        state = if (outcome.failure != null) {
+            state.copy(
+                phase = SharedChatGptAnswerCheckPhase.FAILED,
+                text = outcome.text,
+                failure = outcome.failure,
+            )
+        } else {
+            state.copy(
+                phase = SharedChatGptAnswerCheckPhase.COMPLETED,
+                text = outcome.text,
+                isTruncated = outcome.isTruncated,
+            )
+        }
+    }
+
+    private suspend fun runFollowUp(
+        base: AnswerCheckConversation,
+        messages: List<ChatGptConversationMessage>,
+        index: Int,
+    ) {
+        fun update(transform: (ChatGptFollowUp) -> ChatGptFollowUp) {
+            val followUps = state.followUps
+            val current = followUps.getOrNull(index) ?: return
+            state = state.copy(followUps = followUps.toMutableList().also { it[index] = transform(current) })
+        }
+        fun failFollowUp(failure: ChatGptFailure) = update { it.copy(status = ChatGptFollowUpStatus.FAILED, failure = failure) }
+
+        if (!isNetworkAvailable()) {
+            failFollowUp(ChatGptFailure(ChatGptFailureKind.NETWORK))
+            return
+        }
+        val token = when (val access = chatGpt.freshAccessToken()) {
+            is IosChatGptAccessToken.Ready -> access.value
+            is IosChatGptAccessToken.Unavailable -> {
+                failFollowUp(failureForTokenError(access.errorCode))
+                return
+            }
+        }
+        val body = buildChatGptAnswerCheckRequestBody(
+            model = base.model,
+            instructions = base.instructions,
+            content = base.content,
+            reasoningEffort = base.reasoningEffort,
+            conversation = messages,
+        )
+        val outcome = streamResponse(token, body) { text -> update { it.copy(answer = text) } }
+        update {
+            it.copy(
+                answer = outcome.text,
+                status = if (outcome.failure != null) ChatGptFollowUpStatus.FAILED else ChatGptFollowUpStatus.ANSWERED,
+                failure = outcome.failure,
+                isTruncated = outcome.failure == null && outcome.isTruncated,
+            )
+        }
+    }
+
+    /** Streams one Responses call, publishing the text so far at most every [STREAM_PUBLISH_INTERVAL_MS]. */
+    private suspend fun streamResponse(token: String, body: String, publish: (String) -> Unit): StreamOutcome {
         val parser = ChatGptResponseStreamParser()
         val text = StringBuilder()
         val errorBody = StringBuilder()
@@ -339,7 +431,7 @@ internal class IosChatGptAnswerCheckController(
                     text.append(event.text)
                     if (lastPublish.elapsedNow().inWholeMilliseconds >= STREAM_PUBLISH_INTERVAL_MS) {
                         lastPublish = TimeSource.Monotonic.markNow()
-                        state = state.copy(text = text.toString())
+                        publish(text.toString())
                     }
                 }
                 ChatGptStreamEvent.Completed -> completed = true
@@ -388,19 +480,7 @@ internal class IosChatGptAnswerCheckController(
             else -> null
         }
         if (failure?.kind == ChatGptFailureKind.MODEL_UNAVAILABLE) models = emptyList()
-        state = if (failure != null) {
-            state.copy(
-                phase = SharedChatGptAnswerCheckPhase.FAILED,
-                text = text.toString(),
-                failure = failure,
-            )
-        } else {
-            state.copy(
-                phase = SharedChatGptAnswerCheckPhase.COMPLETED,
-                text = text.toString(),
-                isTruncated = incomplete || !completed,
-            )
-        }
+        return StreamOutcome(text.toString(), failure, isTruncated = incomplete || !completed)
     }
 
     private suspend fun fetchModels(token: String): List<ChatGptModel>? {
@@ -462,3 +542,17 @@ private fun jpegDataUrl(bytes: ByteArray): String = "data:image/jpeg;base64,${Ba
 private fun iosChatGptLog(message: String) {
     IosDiagnosticLogStore.record("ChatGPT", message)
 }
+
+/** The parts of a check that every follow-up question about it sends again. */
+private class AnswerCheckConversation(
+    val model: String,
+    val instructions: String,
+    val content: List<ChatGptInputPart>,
+    val reasoningEffort: String?,
+)
+
+private class StreamOutcome(
+    val text: String,
+    val failure: ChatGptFailure?,
+    val isTruncated: Boolean,
+)

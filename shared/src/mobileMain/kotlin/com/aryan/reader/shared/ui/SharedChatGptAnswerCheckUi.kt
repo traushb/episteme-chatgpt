@@ -7,12 +7,16 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInNew
@@ -23,6 +27,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -33,25 +38,32 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.aryan.reader.shared.chatgpt.CHATGPT_CONTEXT_MAX_PAGES
 import com.aryan.reader.shared.chatgpt.CHATGPT_CONTEXT_PREVIOUS_PAGE_CHOICES
+import com.aryan.reader.shared.chatgpt.CHATGPT_FOLLOW_UP_MAX_CHARS
 import com.aryan.reader.shared.chatgpt.CHATGPT_USAGE_SETTINGS_URL
 import com.aryan.reader.shared.chatgpt.ChatGptAnswerCheckContextSetting
 import com.aryan.reader.shared.chatgpt.ChatGptConnectionState
 import com.aryan.reader.shared.chatgpt.ChatGptConnectionStatus
+import com.aryan.reader.shared.chatgpt.ChatGptContextRangeInput
 import com.aryan.reader.shared.chatgpt.ChatGptFailure
 import com.aryan.reader.shared.chatgpt.ChatGptFailureKind
-import com.aryan.reader.shared.chatgpt.ChatGptContextRangeInput
+import com.aryan.reader.shared.chatgpt.ChatGptFollowUp
+import com.aryan.reader.shared.chatgpt.ChatGptFollowUpStatus
 import com.aryan.reader.shared.chatgpt.ChatGptModel
 import com.aryan.reader.shared.chatgpt.SharedChatGptAnswerCheckPhase
 import com.aryan.reader.shared.chatgpt.SharedPdfAnswerCheckHost
@@ -85,8 +97,11 @@ fun SharedPdfAnswerCheckSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-                .heightIn(min = 260.dp, max = 760.dp),
+                // The height range counts the padding, and the keyboard
+                // (for a follow-up question) shrinks the content, not the sheet.
+                .heightIn(min = 276.dp, max = 776.dp)
+                .imePadding()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             when {
@@ -103,6 +118,21 @@ fun SharedPdfAnswerCheckSheet(
                 )
                 else -> {
                     val isBusy = state.isBusy
+                    val followUps = state.followUps
+                    val resultScroll = rememberScrollState()
+                    // Show a new question and follow its answer while the
+                    // reader stays near the bottom.
+                    LaunchedEffect(followUps.size) {
+                        if (followUps.isNotEmpty()) {
+                            withFrameNanos { }
+                            resultScroll.animateScrollTo(resultScroll.maxValue)
+                        }
+                    }
+                    LaunchedEffect(followUps.lastOrNull()?.answer?.length) {
+                        if (resultScroll.maxValue - resultScroll.value < 600) {
+                            resultScroll.scrollTo(resultScroll.maxValue)
+                        }
+                    }
                     SharedMobileAiResultContent(
                         title = title,
                         markdownText = state.text,
@@ -130,6 +160,10 @@ fun SharedPdfAnswerCheckSheet(
                         } else {
                             readerString("chatgpt_answer_check_preparing", "Preparing the page…")
                         },
+                        afterContent = if (followUps.isEmpty()) null else {
+                            { SharedChatGptFollowUpList(followUps) }
+                        },
+                        scrollState = resultScroll,
                         modifier = Modifier.weight(1f, fill = false),
                     )
                     if (failure != null) {
@@ -141,6 +175,12 @@ fun SharedPdfAnswerCheckSheet(
                                 "ChatGPT stopped before finishing; the feedback may be incomplete.",
                             ),
                             isError = false,
+                        )
+                    }
+                    if (state.phase == SharedChatGptAnswerCheckPhase.COMPLETED) {
+                        SharedChatGptFollowUpInput(
+                            enabled = state.canAskFollowUp,
+                            onAsk = host.onAskFollowUp,
                         )
                     }
                 }
@@ -159,6 +199,99 @@ fun SharedPdfAnswerCheckSheet(
                 connection = host.connection,
                 modelName = state.modelName,
                 reasoningEffort = state.reasoningEffort,
+            )
+        }
+    }
+}
+
+/** The questions asked after the check and ChatGPT's answers, under the check itself. */
+@Composable
+private fun SharedChatGptFollowUpList(followUps: List<ChatGptFollowUp>) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        followUps.forEach { followUp ->
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.padding(start = 48.dp),
+                ) {
+                    Text(
+                        text = followUp.question,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
+            }
+            if (followUp.answer.isNotBlank()) {
+                SharedMarkdownText(
+                    markdown = followUp.answer,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else if (followUp.status == ChatGptFollowUpStatus.ANSWERING) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Text(
+                        readerString("chatgpt_follow_up_answering", "ChatGPT is answering…"),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+            followUp.failure?.let { failure ->
+                SharedChatGptNote(chatGptFailureMessage(failure), isError = true)
+            }
+            if (followUp.status == ChatGptFollowUpStatus.ANSWERED && followUp.isTruncated) {
+                SharedChatGptNote(
+                    readerString(
+                        "chatgpt_answer_check_truncated",
+                        "ChatGPT stopped before finishing; the feedback may be incomplete.",
+                    ),
+                    isError = false,
+                )
+            }
+        }
+    }
+}
+
+/** A question about the check. The next one can be typed while an answer is still coming in. */
+@Composable
+private fun SharedChatGptFollowUpInput(enabled: Boolean, onAsk: (String) -> Unit) {
+    var question by remember { mutableStateOf("") }
+    val send = {
+        val text = question.trim()
+        if (enabled && text.isNotEmpty()) {
+            onAsk(text)
+            question = ""
+        }
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        OutlinedTextField(
+            value = question,
+            onValueChange = { question = it.take(CHATGPT_FOLLOW_UP_MAX_CHARS) },
+            modifier = Modifier.weight(1f),
+            placeholder = { Text(readerString("chatgpt_follow_up_hint", "Ask a follow-up question…")) },
+            maxLines = 4,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.Sentences,
+                imeAction = ImeAction.Send,
+            ),
+            keyboardActions = KeyboardActions(onSend = { send() }),
+        )
+        IconButton(onClick = send, enabled = enabled && question.isNotBlank()) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.Send,
+                contentDescription = readerString("chatgpt_follow_up_send", "Send"),
             )
         }
     }

@@ -23,6 +23,22 @@ enum class SharedChatGptAnswerCheckPhase {
     FAILED,
 }
 
+enum class ChatGptFollowUpStatus {
+    ANSWERING,
+    ANSWERED,
+    FAILED,
+}
+
+/** A question the reader asked after the check, with ChatGPT's answer so far. */
+data class ChatGptFollowUp(
+    val question: String,
+    val answer: String = "",
+    val status: ChatGptFollowUpStatus = ChatGptFollowUpStatus.ANSWERING,
+    val failure: ChatGptFailure? = null,
+    /** The model stopped early (for example on an output limit); [answer] is partial. */
+    val isTruncated: Boolean = false,
+)
+
 data class SharedChatGptAnswerCheckState(
     val phase: SharedChatGptAnswerCheckPhase = SharedChatGptAnswerCheckPhase.IDLE,
     val pageLabel: String = "",
@@ -38,10 +54,19 @@ data class SharedChatGptAnswerCheckState(
     /** Pages prepared so far, while [phase] is PREPARING. */
     val preparedPages: Int = 0,
     val pagesToPrepare: Int = 0,
+    /** Questions asked after the check, oldest first. */
+    val followUps: List<ChatGptFollowUp> = emptyList(),
 ) {
     val isVisible: Boolean get() = phase != SharedChatGptAnswerCheckPhase.IDLE
+    val isAnsweringFollowUp: Boolean get() = followUps.any { it.status == ChatGptFollowUpStatus.ANSWERING }
     val isBusy: Boolean
-        get() = phase == SharedChatGptAnswerCheckPhase.PREPARING || phase == SharedChatGptAnswerCheckPhase.ANALYZING
+        get() = phase == SharedChatGptAnswerCheckPhase.PREPARING ||
+            phase == SharedChatGptAnswerCheckPhase.ANALYZING ||
+            isAnsweringFollowUp
+
+    /** Questions can follow a finished check, one at a time. */
+    val canAskFollowUp: Boolean
+        get() = phase == SharedChatGptAnswerCheckPhase.COMPLETED && !isAnsweringFollowUp
 }
 
 enum class ChatGptConnectionStatus {
@@ -88,6 +113,8 @@ class SharedPdfAnswerCheckHost(
     val onRetry: () -> Unit,
     /** Saves the context for that book; it applies from the next check. */
     val onContextChange: (ChatGptAnswerCheckContextSetting) -> Unit,
+    /** Asks ChatGPT a question about the finished check. */
+    val onAskFollowUp: (String) -> Unit,
     val onSignIn: () -> Unit,
     val onDismiss: () -> Unit,
 )

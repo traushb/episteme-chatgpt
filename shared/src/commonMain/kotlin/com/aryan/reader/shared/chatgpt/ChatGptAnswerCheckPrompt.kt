@@ -14,6 +14,9 @@ const val CHATGPT_CONTEXT_MAX_TEXT_CHARS = 60_000
 
 /** Below this many non-blank characters a page counts as having no text layer. */
 const val CHATGPT_MIN_TEXT_LAYER_CHARS = 16
+
+/** Longest follow-up question the sheet accepts. */
+const val CHATGPT_FOLLOW_UP_MAX_CHARS = 2_000
 private const val MAX_NOTE_CHARS = 1_000
 private const val MAX_NOTES = 40
 
@@ -155,6 +158,8 @@ fun chatGptAnswerCheckInstructions(responseLanguage: String): String {
 
         Format the reply in Markdown: start with one line stating how many attempted answers are correct, then one "###" heading per exercise with short bullet points, and finish with a short overall comment and one concrete tip. Do not copy page texts.
 
+        Follow-up questions: after your check the student may ask about it. Answer only the latest question, directly and briefly, from the same pages and your check; the format above is for the check, so do not repeat the whole check unless asked. If the answer needs material that is not in the given pages, say what is missing instead of guessing.
+
         Write the entire reply in $language. Keep formulas, symbols and quoted terms exactly as written on the page.
     """.trimIndent()
 }
@@ -244,4 +249,24 @@ private fun chatGptPageToCheckText(context: ChatGptAnswerCheckPageContext, hasPa
     } else {
         append("No picture of this page is attached; check the answers from the text above.")
     }
+}
+
+/**
+ * What follows the first message when the reader asks [question]: the check
+ * ([checkText]), then each earlier question that got an answer, then
+ * [question]. Questions that failed or are still unanswered are left out.
+ */
+fun chatGptFollowUpConversation(
+    checkText: String,
+    followUps: List<ChatGptFollowUp>,
+    question: String,
+): List<ChatGptConversationMessage> = buildList {
+    add(ChatGptConversationMessage.Assistant(checkText))
+    followUps
+        .filter { it.status == ChatGptFollowUpStatus.ANSWERED && it.answer.isNotBlank() }
+        .forEach { earlier ->
+            add(ChatGptConversationMessage.User(earlier.question))
+            add(ChatGptConversationMessage.Assistant(earlier.answer))
+        }
+    add(ChatGptConversationMessage.User(question))
 }

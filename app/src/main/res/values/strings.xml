@@ -2761,4 +2761,7 @@
     <string name="chatgpt_reasoning_xhigh">Extra high</string>
     <string name="chatgpt_reasoning_max">Maximum</string>
     <string name="chatgpt_error_reasoning_rejected">ChatGPT did not accept the reasoning effort chosen for this model. Choose another level or Default in AI settings.</string>
+    <string name="chatgpt_follow_up_hint">Ask a follow-up question…</string>
+    <string name="chatgpt_follow_up_send">Send</string>
+    <string name="chatgpt_follow_up_answering">ChatGPT is answering…</string>
 </resources>

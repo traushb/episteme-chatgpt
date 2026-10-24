@@ -4,6 +4,7 @@ import com.aryan.reader.shared.BookItem
 import com.aryan.reader.shared.FileType
 import com.aryan.reader.shared.chatgpt.ChatGptAnswerCheckContextSetting
 import com.aryan.reader.shared.chatgpt.ChatGptFailureKind
+import com.aryan.reader.shared.chatgpt.ChatGptFollowUpStatus
 import com.aryan.reader.shared.chatgpt.SharedChatGptAnswerCheckPhase
 import com.aryan.reader.shared.chatgpt.SharedPdfAnswerCheckRequest
 import com.aryan.reader.shared.pdf.PdfAnnotationKind
@@ -287,6 +288,62 @@ class IosChatGptAnswerCheckTest {
         assertEquals(SharedChatGptAnswerCheckPhase.FAILED, controller.state.phase)
         assertEquals("partial", controller.state.text)
         assertEquals("server_error", controller.state.failure?.code)
+    }
+
+    @Test
+    fun followUpQuestionsCarryThePagesAndTheConversation() = runTest {
+        val http = FakeChatGptHttp(responsesBody = sse(DELTA_OK, COMPLETED))
+        val controller = controller(this, http, connectedBridge { "token" to null })
+        // Nothing to ask about before a check has finished.
+        controller.askFollowUp("Too early?")
+        assertTrue(controller.state.followUps.isEmpty())
+
+        controller.check(request(), force = false)
+        advanceUntilIdle()
+        val checkBody = http.lastResponsesBody()
+
+        http.responsesBody = sse("""{"type":"response.output_text.delta","delta":"Because 2 is even."}""", COMPLETED)
+        controller.askFollowUp("  Why is 2 wrong?  ")
+        // One question at a time.
+        controller.askFollowUp("And 3?")
+        assertEquals(1, controller.state.followUps.size)
+        assertTrue(controller.state.isAnsweringFollowUp)
+        advanceUntilIdle()
+
+        val followUp = controller.state.followUps.single()
+        assertEquals("Why is 2 wrong?", followUp.question)
+        assertEquals("Because 2 is even.", followUp.answer)
+        assertEquals(ChatGptFollowUpStatus.ANSWERED, followUp.status)
+        assertEquals(SharedChatGptAnswerCheckPhase.COMPLETED, controller.state.phase)
+        assertEquals("ok", controller.state.text)
+        val body = http.lastResponsesBody()
+        // The same model, instructions and pages, then the check and the question.
+        assertEquals(checkBody.substringBefore("\"input\""), body.substringBefore("\"input\""))
+        assertTrue("data:image/jpeg;base64,AQID" in body)
+        assertTrue("\"role\":\"assistant\",\"content\":\"ok\"" in body)
+        assertTrue("Why is 2 wrong?" in body)
+
+        http.responsesStatus = 500
+        http.responsesBody = """{"error":{"code":"server_error"}}""".encodeToByteArray()
+        controller.askFollowUp("And 3?")
+        advanceUntilIdle()
+        assertEquals(ChatGptFollowUpStatus.FAILED, controller.state.followUps.last().status)
+        assertTrue(controller.state.canAskFollowUp)
+
+        http.responsesStatus = 200
+        http.responsesBody = sse(DELTA_OK, COMPLETED)
+        controller.askFollowUp("And 4?")
+        advanceUntilIdle()
+        val last = http.lastResponsesBody()
+        // A failed question is left out of what follows.
+        assertFalse("And 3?" in last)
+        assertTrue("Because 2 is even." in last)
+        assertEquals(3, controller.state.followUps.size)
+
+        // A new check starts a new conversation.
+        controller.check(request(), force = false)
+        assertTrue(controller.state.followUps.isEmpty())
+        controller.dismiss()
     }
 
     @Test

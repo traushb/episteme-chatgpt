@@ -110,6 +110,35 @@ class ChatGptAnswerCheckPromptTest {
         assertTrue("❓ when the given material is not enough to judge it" in instructions)
     }
 
+    @Test
+    fun `instructions keep follow-up answers short and on the same pages`() {
+        val instructions = chatGptAnswerCheckInstructions("English")
+        assertTrue("Answer only the latest question" in instructions)
+        assertTrue("do not repeat the whole check unless asked" in instructions)
+    }
+
+    @Test
+    fun `a follow-up carries the check and only the questions that got an answer`() {
+        val conversation = chatGptFollowUpConversation(
+            checkText = "check",
+            followUps = listOf(
+                ChatGptFollowUp("first?", "first answer", ChatGptFollowUpStatus.ANSWERED),
+                ChatGptFollowUp("failed?", "", ChatGptFollowUpStatus.FAILED),
+                ChatGptFollowUp("cut short?", "partial", ChatGptFollowUpStatus.FAILED),
+            ),
+            question = "next?",
+        )
+        assertEquals(
+            listOf(
+                ChatGptConversationMessage.Assistant("check"),
+                ChatGptConversationMessage.User("first?"),
+                ChatGptConversationMessage.Assistant("first answer"),
+                ChatGptConversationMessage.User("next?"),
+            ),
+            conversation,
+        )
+    }
+
     private val pageSeven = ChatGptAnswerCheckPageContext(
         bookTitle = "Logic",
         pageLabel = "7",

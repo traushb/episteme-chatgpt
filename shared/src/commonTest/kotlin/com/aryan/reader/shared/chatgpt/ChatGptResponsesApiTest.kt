@@ -62,6 +62,29 @@ class ChatGptResponsesApiTest {
     }
 
     @Test
+    fun `a follow-up sends the pages again, then the conversation`() {
+        val body = Json.parseToJsonElement(
+            buildChatGptAnswerCheckRequestBody(
+                model = "gpt-test",
+                instructions = "i",
+                content = listOf(ChatGptInputPart.Text("page"), ChatGptInputPart.Image("data:image/jpeg;base64,PAGE")),
+                conversation = listOf(
+                    ChatGptConversationMessage.Assistant("### 1\n✅"),
+                    ChatGptConversationMessage.User("Why is 2 wrong?"),
+                ),
+            )
+        ).jsonObject
+        val input = body["input"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("user", "assistant", "user"), input.map { it.string("role") })
+        assertEquals(2, input[0]["content"]!!.jsonArray.size)
+        assertEquals("### 1\n✅", input[1]["content"]!!.jsonPrimitive.content)
+        val question = input[2]["content"]!!.jsonArray.single().jsonObject
+        assertEquals("input_text", question.string("type"))
+        assertEquals("Why is 2 wrong?", question.string("text"))
+        assertFalse(body["store"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test
     fun `reasoning effort is sent only when one is chosen`() {
         fun body(effort: String?) = Json.parseToJsonElement(
             buildChatGptAnswerCheckRequestBody("gpt-test", "i", listOf(ChatGptInputPart.Text("u")), reasoningEffort = effort)
