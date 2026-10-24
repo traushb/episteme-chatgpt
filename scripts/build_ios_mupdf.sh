@@ -88,6 +88,14 @@ $compiler -r -nostdlib \
   "$build_directory/libmupdf.a" \
   "$build_directory/libmupdf-third.a"
 
+# MuPDF must be inside the object, not left for the app link to find.
+missing="$(xcrun --sdk "$sdk_name" nm -u "$build_directory/readermupdf.o" | grep -E '^_(fz|pdf)_' || true)"
+if [ -n "$missing" ]; then
+  echo "The prelinked MuPDF object still needs:" >&2
+  printf '%s\n' "$missing" | head -n 20 >&2
+  exit 1
+fi
+
 xcrun --sdk "$sdk_name" libtool -static \
   -o "$output_directory/libreadermupdf.a" \
   "$build_directory/readermupdf.o"
