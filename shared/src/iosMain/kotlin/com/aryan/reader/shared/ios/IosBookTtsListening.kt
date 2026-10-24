@@ -27,13 +27,12 @@ import com.aryan.reader.shared.advanceSharedSleepTimer
 import com.aryan.reader.shared.reduce
 import com.aryan.reader.shared.splitSharedTtsListenChunks
 import com.aryan.reader.shared.reader.loadSharedEpubTtsChapters
+import com.aryan.reader.shared.pdf.IosPdfiumDocuments
 import com.aryan.reader.shared.pdf.IosPdfiumRuntime
 import com.aryan.reader.shared.pdf.PdfTextProcessing
 import com.aryan.reader.shared.pdfium.c.FPDF_DOCUMENT
-import com.aryan.reader.shared.pdfium.c.FPDF_CloseDocument
 import com.aryan.reader.shared.pdfium.c.FPDF_ClosePage
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageCount
-import com.aryan.reader.shared.pdfium.c.FPDF_LoadDocument
 import com.aryan.reader.shared.pdfium.c.FPDF_LoadPage
 import com.aryan.reader.shared.pdfium.c.FPDFText_ClosePage
 import com.aryan.reader.shared.pdfium.c.FPDFText_CountChars
@@ -58,6 +57,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.cancel
@@ -1284,14 +1284,18 @@ internal class IosBookTtsListeningController(
             error("This PDF's file is missing ($resolved). It may have been moved or deleted.")
         }
         // PDFium is not thread-safe: serialize against rendering, search, and outline work
-        // exactly like the shared reader pipeline does.
-        return IosPdfiumRuntime.withPdfium {
-            val document = FPDF_LoadDocument(resolved, null) ?: return@withPdfium emptyList()
-            try {
-                val pageCount = FPDF_GetPageCount(document).toInt()
-                (0 until pageCount).map { pageIndex -> extractIosPdfPageText(document, pageIndex) }
-            } finally {
-                FPDF_CloseDocument(document)
+        // exactly like the shared reader pipeline does. The lock is taken per page so the
+        // open book stays responsive while a long one is read in.
+        val handle = IosPdfiumRuntime.withPdfium { IosPdfiumDocuments.acquire(resolved, null) }
+            ?: return emptyList()
+        return try {
+            val pageCount = IosPdfiumRuntime.withPdfium { FPDF_GetPageCount(handle.document) }
+            (0 until pageCount).map { pageIndex ->
+                IosPdfiumRuntime.withPdfium { extractIosPdfPageText(handle.document, pageIndex) }
+            }
+        } finally {
+            withContext(NonCancellable) {
+                IosPdfiumRuntime.withPdfium { IosPdfiumDocuments.release(handle) }
             }
         }
     }

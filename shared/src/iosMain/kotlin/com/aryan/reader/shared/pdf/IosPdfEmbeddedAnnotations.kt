@@ -10,13 +10,12 @@ import com.aryan.reader.shared.pdfium.c.FPDFPage_CloseAnnot
 import com.aryan.reader.shared.pdfium.c.FPDFPage_GetAnnot
 import com.aryan.reader.shared.pdfium.c.FPDFPage_GetAnnotCount
 import com.aryan.reader.shared.pdfium.c.FPDF_ANNOT_LINK
-import com.aryan.reader.shared.pdfium.c.FPDF_CloseDocument
 import com.aryan.reader.shared.pdfium.c.FPDF_ClosePage
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageHeightF
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageWidthF
-import com.aryan.reader.shared.pdfium.c.FPDF_LoadDocument
 import com.aryan.reader.shared.pdfium.c.FPDF_LoadPage
 import com.aryan.reader.shared.pdfium.c.FS_RECTF
+import com.aryan.reader.shared.ios.resolveIosReadablePath
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.memScoped
@@ -32,10 +31,13 @@ internal suspend fun loadIosPdfEmbeddedAnnotations(
     pageIndex: Int,
     password: String?,
 ): List<SharedPdfEmbeddedAnnotation> = withContext(Dispatchers.Default) {
-    val source = path?.takeIf(NSFileManager.defaultManager::fileExistsAtPath) ?: return@withContext emptyList()
+    val source = path.resolveIosReadablePath()
+        ?.takeIf(NSFileManager.defaultManager::fileExistsAtPath)
+        ?: return@withContext emptyList()
     IosPdfiumRuntime.mutex.withLock {
         IosPdfiumRuntime.ensureInitialized()
-        val document = FPDF_LoadDocument(source, password) ?: return@withLock emptyList()
+        val handle = IosPdfiumDocuments.acquire(source, password) ?: return@withLock emptyList()
+        val document = handle.document
         try {
             val page = FPDF_LoadPage(document, pageIndex) ?: return@withLock emptyList()
             try {
@@ -80,7 +82,7 @@ internal suspend fun loadIosPdfEmbeddedAnnotations(
                 FPDF_ClosePage(page)
             }
         } finally {
-            FPDF_CloseDocument(document)
+            IosPdfiumDocuments.release(handle)
         }
     }
 }

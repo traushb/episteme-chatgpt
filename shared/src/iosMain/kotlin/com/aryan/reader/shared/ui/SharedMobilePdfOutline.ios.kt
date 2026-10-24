@@ -4,6 +4,7 @@ package com.aryan.reader.shared.ui
 
 import com.aryan.reader.shared.BookItem
 import com.aryan.reader.shared.PdfTocEntry
+import com.aryan.reader.shared.pdf.IosPdfiumDocuments
 import com.aryan.reader.shared.pdf.IosPdfiumRuntime
 import com.aryan.reader.shared.pdfium.c.FPDFBookmark_GetDest
 import com.aryan.reader.shared.pdfium.c.FPDFBookmark_GetAction
@@ -13,26 +14,24 @@ import com.aryan.reader.shared.pdfium.c.FPDFBookmark_GetFirstChild
 import com.aryan.reader.shared.pdfium.c.FPDFBookmark_GetNextSibling
 import com.aryan.reader.shared.pdfium.c.FPDFBookmark_GetTitle
 import com.aryan.reader.shared.pdfium.c.FPDFDest_GetDestPageIndex
-import com.aryan.reader.shared.pdfium.c.FPDF_CloseDocument
-import com.aryan.reader.shared.pdfium.c.FPDF_LoadDocument
 import com.aryan.reader.shared.pdfium.c.PDFACTION_GOTO
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.get
 import kotlinx.cinterop.memScoped
 import platform.Foundation.NSFileManager
-import platform.Foundation.NSURL
+import com.aryan.reader.shared.ios.resolveIosReadablePath
 
 internal actual suspend fun loadSharedMobilePdfOutline(
     book: BookItem,
     password: String?,
 ): List<PdfTocEntry> {
-    val path = book.path?.trim()?.takeIf { it.isNotBlank() }?.let { value ->
-        if (value.startsWith("file://")) NSURL.URLWithString(value)?.path ?: value.removePrefix("file://") else value
-    } ?: return emptyList()
+    // Resolved like every other reader of the file, so the open document is shared.
+    val path = book.path.resolveIosReadablePath() ?: return emptyList()
     if (!NSFileManager.defaultManager.fileExistsAtPath(path)) return emptyList()
     return IosPdfiumRuntime.withPdfium {
-        val document = FPDF_LoadDocument(path, password) ?: return@withPdfium emptyList()
+        val handle = IosPdfiumDocuments.acquire(path, password) ?: return@withPdfium emptyList()
+        val document = handle.document
         try {
         val result = mutableListOf<PdfTocEntry>()
         fun titleOf(bookmark: com.aryan.reader.shared.pdfium.c.FPDF_BOOKMARK): String = memScoped {
@@ -79,7 +78,7 @@ internal actual suspend fun loadSharedMobilePdfOutline(
         appendChildren(null, 0)
             result
         } finally {
-            FPDF_CloseDocument(document)
+            IosPdfiumDocuments.release(handle)
         }
     }
 }

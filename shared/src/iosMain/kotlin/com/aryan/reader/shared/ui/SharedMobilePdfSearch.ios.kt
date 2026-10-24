@@ -9,11 +9,11 @@ import com.aryan.reader.shared.pdf.boundsForRange
 import com.aryan.reader.shared.pdf.buildIosPdfOcrTextPage
 import com.aryan.reader.shared.pdf.IosPdfOcrPageCache
 import com.aryan.reader.shared.pdf.SharedPdfSearchResult
+import com.aryan.reader.shared.pdf.IosPdfiumDocuments
 import com.aryan.reader.shared.pdf.IosPdfiumRuntime
-import com.aryan.reader.shared.pdfium.c.FPDF_CloseDocument
 import com.aryan.reader.shared.pdfium.c.FPDF_ClosePage
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageCount
-import com.aryan.reader.shared.pdfium.c.FPDF_LoadDocument
+import com.aryan.reader.shared.pdfium.c.FPDF_DOCUMENT
 import com.aryan.reader.shared.pdfium.c.FPDF_LoadPage
 import com.aryan.reader.shared.pdfium.c.FPDFText_LoadPage
 import com.aryan.reader.shared.pdfium.c.FPDFText_ClosePage
@@ -24,6 +24,7 @@ import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.UShortVar
 import kotlinx.cinterop.get
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
@@ -86,58 +87,28 @@ private suspend fun searchIosPdfLocked(
         return cached.index.search(query).withIosPdfOcrBounds(cached.ocrPages)
     }
 
-    val indexed = IosPdfiumRuntime.withPdfium {
-        val document = FPDF_LoadDocument(resolvedPath, password) ?: return@withPdfium null
-        try {
-            val pageCount = FPDF_GetPageCount(document)
-            val index = com.aryan.reader.shared.pdf.SharedPdfSearchIndex(pageCount)
-            val ocrCandidates = mutableListOf<Int>()
-
-            for (pageIndex in 0 until pageCount) {
-                currentCoroutineContext().ensureActive()
-                val page = FPDF_LoadPage(document, pageIndex)
-                if (page == null) {
-                    index.putPage(pageIndex, "")
-                    ocrCandidates += pageIndex
-                    continue
-                }
-                try {
-                    val textPage = FPDFText_LoadPage(page)
-                    if (textPage == null) {
-                        index.putPage(pageIndex, "")
-                        ocrCandidates += pageIndex
-                        continue
-                    }
-                    try {
-                        val charCount = FPDFText_CountChars(textPage)
-                        val pageText = if (charCount > 0) {
-                            memScoped {
-                                val buffer = allocArray<UShortVar>(charCount + 1)
-                                val written = FPDFText_GetText(textPage, 0, charCount, buffer)
-                                if (written > 0) {
-                                    CharArray(written) { index -> buffer[index].toInt().toChar() }
-                                        .concatToString()
-                                        .trimEnd('\u0000')
-                                } else {
-                                    ""
-                                }
-                            }
-                        } else ""
-                        index.putPage(pageIndex, pageText)
-                        if (pageText.isBlank()) ocrCandidates += pageIndex
-                    } finally {
-                        FPDFText_ClosePage(textPage)
-                    }
-                } finally {
-                    FPDF_ClosePage(page)
-                }
-            }
-            index to ocrCandidates
-        } finally {
-            FPDF_CloseDocument(document)
+    // The document stays open across pages, but the PDFium lock is taken per
+    // page: indexing a long book used to hold it for seconds, stalling text
+    // selection (which waits for it on the main thread) and page text layers.
+    val handle = IosPdfiumRuntime.withPdfium { IosPdfiumDocuments.acquire(resolvedPath, password) }
+        ?: return emptyList()
+    val indexed = try {
+        val pageCount = IosPdfiumRuntime.withPdfium { FPDF_GetPageCount(handle.document) }
+        val index = com.aryan.reader.shared.pdf.SharedPdfSearchIndex(pageCount)
+        val ocrCandidates = mutableListOf<Int>()
+        for (pageIndex in 0 until pageCount) {
+            currentCoroutineContext().ensureActive()
+            val pageText = IosPdfiumRuntime.withPdfium { readIosPdfPageText(handle.document, pageIndex) }
+            index.putPage(pageIndex, pageText.orEmpty())
+            if (pageText.isNullOrBlank()) ocrCandidates += pageIndex
+        }
+        index to ocrCandidates
+    } finally {
+        withContext(NonCancellable) {
+            IosPdfiumRuntime.withPdfium { IosPdfiumDocuments.release(handle) }
         }
     }
-    val (index, ocrCandidates) = indexed ?: return emptyList()
+    val (index, ocrCandidates) = indexed
 
     val ocrPages = buildMap {
         ocrCandidates.forEach { pageIndex ->
@@ -157,6 +128,33 @@ private suspend fun searchIosPdfLocked(
     }
     iosPdfSearchCacheEntry = IosPdfSearchCacheEntry(cacheKey, index, ocrPages)
     return index.search(query).withIosPdfOcrBounds(ocrPages)
+}
+
+/** The page's text layer; null when PDFium cannot load the page or its text. Caller holds the PDFium lock. */
+private fun readIosPdfPageText(document: FPDF_DOCUMENT, pageIndex: Int): String? {
+    val page = FPDF_LoadPage(document, pageIndex) ?: return null
+    try {
+        val textPage = FPDFText_LoadPage(page) ?: return null
+        try {
+            val charCount = FPDFText_CountChars(textPage)
+            if (charCount <= 0) return ""
+            return memScoped {
+                val buffer = allocArray<UShortVar>(charCount + 1)
+                val written = FPDFText_GetText(textPage, 0, charCount, buffer)
+                if (written > 0) {
+                    CharArray(written) { index -> buffer[index].toInt().toChar() }
+                        .concatToString()
+                        .trimEnd('\u0000')
+                } else {
+                    ""
+                }
+            }
+        } finally {
+            FPDFText_ClosePage(textPage)
+        }
+    } finally {
+        FPDF_ClosePage(page)
+    }
 }
 
 private fun List<SharedPdfSearchResult>.withIosPdfOcrBounds(

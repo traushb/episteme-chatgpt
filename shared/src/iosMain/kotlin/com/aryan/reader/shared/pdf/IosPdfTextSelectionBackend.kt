@@ -22,13 +22,11 @@ import com.aryan.reader.shared.pdfium.c.PDFACTION_GOTO
 import com.aryan.reader.shared.pdfium.c.PDFACTION_LAUNCH
 import com.aryan.reader.shared.pdfium.c.PDFACTION_REMOTEGOTO
 import com.aryan.reader.shared.pdfium.c.PDFACTION_URI
-import com.aryan.reader.shared.pdfium.c.FPDF_CloseDocument
 import com.aryan.reader.shared.pdfium.c.FPDF_ClosePage
 import com.aryan.reader.shared.pdfium.c.FPDF_DOCUMENT
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageCount
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageHeightF
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageWidthF
-import com.aryan.reader.shared.pdfium.c.FPDF_LoadDocument
 import com.aryan.reader.shared.pdfium.c.FPDF_LoadPage
 import com.aryan.reader.shared.pdfium.c.FPDF_PAGE
 import com.aryan.reader.shared.pdfium.c.FPDFText_ClosePage
@@ -75,12 +73,14 @@ import com.aryan.reader.shared.ios.resolveIosReadablePath
  * (origin top-left).
  */
 internal class IosPdfTextPage internal constructor(
-    private val document: FPDF_DOCUMENT,
+    private val documentHandle: IosPdfiumDocuments.Handle,
     private val page: FPDF_PAGE,
     private val textPage: FPDF_TEXTPAGE,
     private val pageWidth: Float,
     private val pageHeight: Float
 ) : PdfTextPageSession, AutoCloseable {
+
+    private val document: FPDF_DOCUMENT = documentHandle.document
 
     /**
      * PDFium page/text handles are not safe to use concurrently with each other or with
@@ -360,7 +360,7 @@ internal class IosPdfTextPage internal constructor(
                         closed = true
                         textPage?.let(::FPDFText_ClosePage)
                         page?.let(::FPDF_ClosePage)
-                        document?.let(::FPDF_CloseDocument)
+                        IosPdfiumDocuments.release(documentHandle)
                     }
                 }
             }
@@ -390,30 +390,32 @@ internal class IosPdfTextPage internal constructor(
             val resolvedPath = path.resolveIosReadablePath() ?: return null
             if (!NSFileManager.defaultManager.fileExistsAtPath(resolvedPath)) return null
             ensureLibraryInitialized()
-            val document = FPDF_LoadDocument(resolvedPath, password) ?: return null
+            // The document stays open for the reader; the session holds it until close().
+            val handle = IosPdfiumDocuments.acquire(resolvedPath, password) ?: return null
+            val document = handle.document
             return try {
                 val pageCount = FPDF_GetPageCount(document).coerceAtLeast(1)
                 val safePageIndex = pageIndex.coerceIn(0, pageCount - 1)
                 val page = FPDF_LoadPage(document, safePageIndex) ?: run {
-                    FPDF_CloseDocument(document)
+                    IosPdfiumDocuments.release(handle)
                     return null
                 }
                 val textPage = FPDFText_LoadPage(page) ?: run {
                     FPDF_ClosePage(page)
-                    FPDF_CloseDocument(document)
+                    IosPdfiumDocuments.release(handle)
                     return null
                 }
                 val pageWidth = FPDF_GetPageWidthF(page).coerceAtLeast(1f)
                 val pageHeight = FPDF_GetPageHeightF(page).coerceAtLeast(1f)
                 IosPdfTextPage(
-                    document = document,
+                    documentHandle = handle,
                     page = page,
                     textPage = textPage,
                     pageWidth = pageWidth,
                     pageHeight = pageHeight
                 )
             } catch (cause: Throwable) {
-                FPDF_CloseDocument(document)
+                IosPdfiumDocuments.release(handle)
                 null
             }
         }

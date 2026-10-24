@@ -6,7 +6,6 @@ import com.aryan.reader.shared.pdfium.c.FPDFBitmap_BGRA
 import com.aryan.reader.shared.pdfium.c.FPDFBitmap_CreateEx
 import com.aryan.reader.shared.pdfium.c.FPDFBitmap_Destroy
 import com.aryan.reader.shared.pdfium.c.FPDFBitmap_FillRect
-import com.aryan.reader.shared.pdfium.c.FPDF_CloseDocument
 import com.aryan.reader.shared.pdfium.c.FPDF_ClosePage
 import com.aryan.reader.shared.pdfium.c.FPDF_DOCUMENT
 import com.aryan.reader.shared.pdfium.c.FPDF_GetLastError
@@ -14,7 +13,6 @@ import com.aryan.reader.shared.pdfium.c.FPDF_GetPageCount
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageHeightF
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageSizeByIndex
 import com.aryan.reader.shared.pdfium.c.FPDF_GetPageWidthF
-import com.aryan.reader.shared.pdfium.c.FPDF_LoadDocument
 import com.aryan.reader.shared.pdfium.c.FPDF_LoadPage
 import com.aryan.reader.shared.pdfium.c.FPDF_PAGE
 import com.aryan.reader.shared.pdfium.c.FPDF_RenderPageBitmap
@@ -30,7 +28,7 @@ import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.value
 
-/** PDFium, as the reader used it before MuPDF: the file is opened for each call. */
+/** PDFium, on the documents the reader keeps open ([IosPdfiumDocuments]). */
 internal object IosPdfiumPageRasterizer : IosPdfPageRasterizer {
     override suspend fun <T> withPage(
         path: String,
@@ -38,11 +36,12 @@ internal object IosPdfiumPageRasterizer : IosPdfPageRasterizer {
         pageIndex: Int,
         block: (IosPdfRasterPage) -> T,
     ): IosPdfRasterResult<T> = IosPdfiumRuntime.withPdfium {
-        val document = FPDF_LoadDocument(path, password)
+        val handle = IosPdfiumDocuments.acquire(path, password)
             ?: return@withPdfium IosPdfRasterResult.Failed(
                 message = "Pdfium could not open this PDF",
                 openError = sharedMobilePdfOpenErrorForPdfiumCode(FPDF_GetLastError().toLong()),
             )
+        val document = handle.document
         try {
             val pageCount = FPDF_GetPageCount(document)
             if (pageCount <= 0) {
@@ -63,7 +62,7 @@ internal object IosPdfiumPageRasterizer : IosPdfPageRasterizer {
                 FPDF_ClosePage(page)
             }
         } finally {
-            FPDF_CloseDocument(document)
+            IosPdfiumDocuments.release(handle)
         }
     }
 }
