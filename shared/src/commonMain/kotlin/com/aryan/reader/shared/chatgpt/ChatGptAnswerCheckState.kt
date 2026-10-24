@@ -117,4 +117,16 @@ class SharedPdfAnswerCheckHost(
     val onAskFollowUp: (String) -> Unit,
     val onSignIn: () -> Unit,
     val onDismiss: () -> Unit,
+    /** Share of the reader's width the panel beside the PDF takes. */
+    val panelWidthFraction: Float = CHATGPT_PANEL_DEFAULT_WIDTH_FRACTION,
+    /** Saves the panel width the reader dragged the divider to. */
+    val onPanelWidthFractionChange: (Float) -> Unit = {},
 )
+
+/** The answer-check panel's share of the reader's width until the reader resizes it. */
+const val CHATGPT_PANEL_DEFAULT_WIDTH_FRACTION = 0.36f
+
+/** A saved panel width, or the default when there is none or it is not a usable share. */
+fun sanitizeChatGptPanelWidthFraction(value: Float?): Float =
+    value?.takeIf { it.isFinite() && it > 0f && it < 1f }?.coerceIn(0.15f, 0.85f)
+        ?: CHATGPT_PANEL_DEFAULT_WIDTH_FRACTION

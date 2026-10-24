@@ -2419,6 +2419,15 @@ fun SharedMobilePdfReaderHost(
         }
     }
 
+    // The answer check docks beside the reader (or opens as a sheet where it
+    // does not fit). The reader below keeps its indentation to keep this diff
+    // reviewable; it is the dock's content.
+    SharedPdfAnswerCheckDock(
+        host = answerCheck?.takeIf { ownsGlobalModal },
+        bookTitle = book.title?.takeIf { it.isNotBlank() } ?: book.displayName,
+        isMainTtsActive = isPdfTtsPlayingOrLoading,
+        modifier = modifier,
+    ) {
     ModalNavigationDrawer(
         drawerState = drawerState,
         gesturesEnabled = drawerState.isOpen,
@@ -2462,7 +2471,7 @@ fun SharedMobilePdfReaderHost(
                 },
             )
         },
-        modifier = modifier
+        modifier = Modifier.fillMaxSize()
     ) {
         Scaffold(
             topBar = {
@@ -4944,6 +4953,7 @@ fun SharedMobilePdfReaderHost(
             }
         }
     }
+    }
 
     noteAnnotationId?.let { annotationId ->
         val annotation = readerState.annotations.firstOrNull { it.id == annotationId }
@@ -5081,13 +5091,6 @@ fun SharedMobilePdfReaderHost(
                 aiCacheRevision++
             },
             onDismiss = { showAiHub = false },
-        )
-    }
-    if (answerCheck != null && answerCheck.state.isVisible && ownsGlobalModal) {
-        SharedPdfAnswerCheckSheet(
-            host = answerCheck,
-            bookTitle = book.title?.takeIf { it.isNotBlank() } ?: book.displayName,
-            isMainTtsActive = isPdfTtsPlayingOrLoading,
         )
     }
     LaunchedEffect(readerExtrasState.aiResult) {

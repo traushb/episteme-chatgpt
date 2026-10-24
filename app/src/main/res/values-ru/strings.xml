@@ -1977,4 +1977,9 @@
     <string name="chatgpt_follow_up_hint">Задайте уточняющий вопрос…</string>
     <string name="chatgpt_follow_up_send">Отправить</string>
     <string name="chatgpt_follow_up_answering">ChatGPT отвечает…</string>
+    <string name="chatgpt_panel_context">Страницы контекста</string>
+    <string name="chatgpt_panel_close">Закрыть ChatGPT</string>
+    <string name="chatgpt_panel_divider">Разделитель панели ChatGPT</string>
+    <string name="chatgpt_panel_wider">Расширить панель ChatGPT</string>
+    <string name="chatgpt_panel_narrower">Сузить панель ChatGPT</string>
 </resources>

@@ -2,6 +2,7 @@ package com.aryan.reader.shared.ios
 
 import com.aryan.reader.shared.BookItem
 import com.aryan.reader.shared.FileType
+import com.aryan.reader.shared.chatgpt.CHATGPT_PANEL_DEFAULT_WIDTH_FRACTION
 import com.aryan.reader.shared.chatgpt.ChatGptAnswerCheckContextSetting
 import com.aryan.reader.shared.chatgpt.ChatGptFailureKind
 import com.aryan.reader.shared.chatgpt.ChatGptFollowUpStatus
@@ -133,6 +134,20 @@ class IosChatGptAnswerCheckTest {
         reopened.check(logic, force = false)
         advanceUntilIdle()
         assertEquals(listOf(2, 3), reopened.state.contextPageNumbers)
+    }
+
+    @Test
+    fun panelWidthIsSavedAcrossLaunches() = runTest {
+        val defaults = NSUserDefaults(suiteName = DEFAULTS_SUITE)
+        val http = FakeChatGptHttp(responsesBody = sse(DELTA_OK, COMPLETED))
+        val controller = controller(this, http, connectedBridge { "token" to null }, defaults = defaults)
+        assertEquals(CHATGPT_PANEL_DEFAULT_WIDTH_FRACTION, controller.host.panelWidthFraction)
+
+        controller.host.onPanelWidthFractionChange(0.5f)
+        assertEquals(0.5f, controller.host.panelWidthFraction)
+
+        val reopened = controller(this, http, connectedBridge { "token" to null }, defaults = defaults)
+        assertEquals(0.5f, reopened.host.panelWidthFraction)
     }
 
     @Test

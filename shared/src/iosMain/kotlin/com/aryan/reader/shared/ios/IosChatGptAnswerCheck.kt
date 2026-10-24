@@ -39,6 +39,7 @@ import com.aryan.reader.shared.chatgpt.decodeChatGptReasoningEfforts
 import com.aryan.reader.shared.chatgpt.encodeChatGptReasoningEfforts
 import com.aryan.reader.shared.chatgpt.parseChatGptApiError
 import com.aryan.reader.shared.chatgpt.parseChatGptModelCatalog
+import com.aryan.reader.shared.chatgpt.sanitizeChatGptPanelWidthFraction
 import com.aryan.reader.shared.ui.ANSWER_CHECK_CONTEXT_JPEG_QUALITY
 import com.aryan.reader.shared.ui.ANSWER_CHECK_CONTEXT_PAGE_LONG_SIDE_PX
 import com.aryan.reader.shared.ui.ANSWER_CHECK_JPEG_QUALITY
@@ -64,6 +65,9 @@ private const val CHATGPT_REASONING_EFFORTS_DEFAULTS_KEY = "reader.chatgpt.reaso
 
 /** Prefix of the per-book context setting; the book id follows. */
 private const val CHATGPT_CONTEXT_DEFAULTS_KEY_PREFIX = "reader.chatgpt.answer_check_context.v1."
+
+/** The answer-check panel's share of the reader's width, as last dragged. */
+private const val CHATGPT_PANEL_WIDTH_DEFAULTS_KEY = "reader.chatgpt.answer_check_panel_width.v1"
 
 /** Coalesces streamed text into UI updates at most this often. */
 private const val STREAM_PUBLISH_INTERVAL_MS = 60L
@@ -109,6 +113,15 @@ internal class IosChatGptAnswerCheckController(
     /** The context saved for the book of the last check. */
     var contextSetting by mutableStateOf(ChatGptAnswerCheckContextSetting())
         private set
+
+    /** Share of the reader's width the panel beside the PDF takes. */
+    private var panelWidthFraction by mutableStateOf(
+        sanitizeChatGptPanelWidthFraction(
+            defaults.objectForKey(CHATGPT_PANEL_WIDTH_DEFAULTS_KEY)?.let {
+                defaults.doubleForKey(CHATGPT_PANEL_WIDTH_DEFAULTS_KEY).toFloat()
+            }
+        )
+    )
     private var contextBookId: String? = null
     private var contextPageCount = 1
 
@@ -137,6 +150,8 @@ internal class IosChatGptAnswerCheckController(
             onAskFollowUp = ::askFollowUp,
             onSignIn = ::signIn,
             onDismiss = ::dismiss,
+            panelWidthFraction = panelWidthFraction,
+            onPanelWidthFractionChange = ::savePanelWidth,
         )
 
     fun check(request: SharedPdfAnswerCheckRequest, force: Boolean) {
@@ -200,6 +215,12 @@ internal class IosChatGptAnswerCheckController(
         val messages = chatGptFollowUpConversation(state.text, earlier, text)
         state = state.copy(followUps = earlier + ChatGptFollowUp(question = text))
         job = scope.launch { runFollowUp(base, messages, index = earlier.size) }
+    }
+
+    fun savePanelWidth(fraction: Float) {
+        val sanitized = sanitizeChatGptPanelWidthFraction(fraction)
+        panelWidthFraction = sanitized
+        defaults.setDouble(sanitized.toDouble(), forKey = CHATGPT_PANEL_WIDTH_DEFAULTS_KEY)
     }
 
     fun selectModel(slug: String) {

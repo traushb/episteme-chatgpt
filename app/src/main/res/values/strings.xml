@@ -2764,4 +2764,9 @@
     <string name="chatgpt_follow_up_hint">Ask a follow-up question…</string>
     <string name="chatgpt_follow_up_send">Send</string>
     <string name="chatgpt_follow_up_answering">ChatGPT is answering…</string>
+    <string name="chatgpt_panel_context">Context pages</string>
+    <string name="chatgpt_panel_close">Close ChatGPT</string>
+    <string name="chatgpt_panel_divider">ChatGPT panel divider</string>
+    <string name="chatgpt_panel_wider">Widen the ChatGPT panel</string>
+    <string name="chatgpt_panel_narrower">Narrow the ChatGPT panel</string>
 </resources>

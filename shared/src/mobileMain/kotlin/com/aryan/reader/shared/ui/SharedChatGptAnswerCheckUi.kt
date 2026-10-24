@@ -3,14 +3,21 @@ package com.aryan.reader.shared.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -18,16 +25,20 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -72,10 +83,11 @@ import com.aryan.reader.shared.chatgpt.formatChatGptPageNumbers
 import com.aryan.reader.shared.chatgpt.parseChatGptContextRange
 
 /**
- * The answer-check popup: ChatGPT's feedback on the current page streams in
- * as Markdown, with the same read-aloud and copy actions as other AI results.
- * When there is no usable ChatGPT connection the sheet offers sign-in in
- * place, and the host resumes the check once the user is back.
+ * The answer-check popup, for screens too narrow for the panel beside the
+ * PDF ([SharedPdfAnswerCheckPanel]): ChatGPT's feedback on the current page
+ * streams in as Markdown, with the same read-aloud and copy actions as other
+ * AI results. When there is no usable ChatGPT connection the sheet offers
+ * sign-in in place, and the host resumes the check once the user is back.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -86,7 +98,6 @@ fun SharedPdfAnswerCheckSheet(
 ) {
     val state = host.state
     val failure = state.failure
-    val title = readerString("chatgpt_answer_check_title", "Answer check · page %1\$s", state.pageLabel)
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = host.onDismiss,
@@ -104,87 +115,12 @@ fun SharedPdfAnswerCheckSheet(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            when {
-                failure != null && failure.needsSignIn -> SharedChatGptSignInPrompt(
-                    title = title,
-                    failure = failure,
-                    connection = host.connection,
-                    onSignIn = host.onSignIn,
-                )
-                failure != null && state.text.isBlank() -> SharedChatGptAnswerCheckFailure(
-                    title = title,
-                    failure = failure,
-                    onRetry = host.onRetry,
-                )
-                else -> {
-                    val isBusy = state.isBusy
-                    val followUps = state.followUps
-                    val resultScroll = rememberScrollState()
-                    // Show a new question and follow its answer while the
-                    // reader stays near the bottom.
-                    LaunchedEffect(followUps.size) {
-                        if (followUps.isNotEmpty()) {
-                            withFrameNanos { }
-                            resultScroll.animateScrollTo(resultScroll.maxValue)
-                        }
-                    }
-                    LaunchedEffect(followUps.lastOrNull()?.answer?.length) {
-                        if (resultScroll.maxValue - resultScroll.value < 600) {
-                            resultScroll.scrollTo(resultScroll.maxValue)
-                        }
-                    }
-                    SharedMobileAiResultContent(
-                        title = title,
-                        markdownText = state.text,
-                        errorText = null,
-                        isLoading = isBusy,
-                        cost = null,
-                        freeRemaining = null,
-                        isCacheHit = false,
-                        onRegenerate = if (isBusy) null else host.onRetry,
-                        onClear = null,
-                        onOpenExternalDictionary = null,
-                        isMainTtsActive = isMainTtsActive,
-                        ttsBookTitle = bookTitle,
-                        ttsChapterTitle = title,
-                        showUsageBadge = false,
-                        progressMessage = if (state.phase != SharedChatGptAnswerCheckPhase.PREPARING) {
-                            readerString("chatgpt_answer_check_analyzing", "ChatGPT is checking your answers…")
-                        } else if (state.pagesToPrepare > 1) {
-                            readerString(
-                                "chatgpt_answer_check_preparing_pages",
-                                "Preparing pages… %1\$d of %2\$d",
-                                state.preparedPages.coerceAtMost(state.pagesToPrepare),
-                                state.pagesToPrepare,
-                            )
-                        } else {
-                            readerString("chatgpt_answer_check_preparing", "Preparing the page…")
-                        },
-                        afterContent = if (followUps.isEmpty()) null else {
-                            { SharedChatGptFollowUpList(followUps) }
-                        },
-                        scrollState = resultScroll,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    if (failure != null) {
-                        SharedChatGptNote(chatGptFailureMessage(failure), isError = true)
-                    } else if (state.phase == SharedChatGptAnswerCheckPhase.COMPLETED && state.isTruncated) {
-                        SharedChatGptNote(
-                            readerString(
-                                "chatgpt_answer_check_truncated",
-                                "ChatGPT stopped before finishing; the feedback may be incomplete.",
-                            ),
-                            isError = false,
-                        )
-                    }
-                    if (state.phase == SharedChatGptAnswerCheckPhase.COMPLETED) {
-                        SharedChatGptFollowUpInput(
-                            enabled = state.canAskFollowUp,
-                            onAsk = host.onAskFollowUp,
-                        )
-                    }
-                }
-            }
+            SharedChatGptAnswerCheckBody(
+                host = host,
+                bookTitle = bookTitle,
+                isMainTtsActive = isMainTtsActive,
+                fillHeight = false,
+            )
             if (failure == null || !failure.needsSignIn) {
                 SharedChatGptContextControls(
                     context = host.context,
@@ -200,6 +136,193 @@ fun SharedPdfAnswerCheckSheet(
                 modelName = state.modelName,
                 reasoningEffort = state.reasoningEffort,
             )
+        }
+    }
+}
+
+/**
+ * The answer check in a panel beside the PDF, where it stays while the reader
+ * keeps reading and writing: the check and the follow-up questions scroll in
+ * the middle, the question field stays at the bottom, and the context pages
+ * fold away under the header.
+ */
+@Composable
+internal fun SharedPdfAnswerCheckPanel(
+    host: SharedPdfAnswerCheckHost,
+    bookTitle: String,
+    isMainTtsActive: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val state = host.state
+    val failure = state.failure
+    val canChangeContext = failure == null || !failure.needsSignIn
+    var showContext by remember { mutableStateOf(false) }
+    Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, modifier = modifier) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                // The bottom inset includes the keyboard, so the question
+                // field rises above it.
+                .windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(
+                        WindowInsetsSides.Top + WindowInsetsSides.End + WindowInsetsSides.Bottom
+                    )
+                )
+                .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    readerString("chatgpt_settings_title", "ChatGPT"),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                if (canChangeContext) {
+                    IconButton(onClick = { showContext = !showContext }) {
+                        Icon(
+                            Icons.Default.Tune,
+                            contentDescription = readerString("chatgpt_panel_context", "Context pages"),
+                            tint = if (showContext) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+                        )
+                    }
+                }
+                IconButton(onClick = host.onDismiss) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = readerString("chatgpt_panel_close", "Close ChatGPT"),
+                    )
+                }
+            }
+            if (showContext && canChangeContext) {
+                SharedChatGptContextControls(
+                    context = host.context,
+                    pageCount = host.pageCount,
+                    sentPageNumbers = state.contextPageNumbers,
+                    isBusy = state.isBusy,
+                    onContextChange = host.onContextChange,
+                    onCheckAgain = host.onRetry,
+                )
+                HorizontalDivider()
+            }
+            SharedChatGptAnswerCheckBody(
+                host = host,
+                bookTitle = bookTitle,
+                isMainTtsActive = isMainTtsActive,
+                fillHeight = true,
+            )
+            SharedChatGptPlanFooter(
+                connection = host.connection,
+                modelName = state.modelName,
+                reasoningEffort = state.reasoningEffort,
+            )
+        }
+    }
+}
+
+/**
+ * The check with its follow-up questions and the question field, or the
+ * sign-in prompt or the failure in its place. With [fillHeight] the result
+ * takes the rest of the column, which keeps the field at the bottom of the
+ * panel; in the sheet the result only grows as tall as it needs.
+ */
+@Composable
+private fun ColumnScope.SharedChatGptAnswerCheckBody(
+    host: SharedPdfAnswerCheckHost,
+    bookTitle: String,
+    isMainTtsActive: Boolean,
+    fillHeight: Boolean,
+) {
+    val state = host.state
+    val failure = state.failure
+    val title = readerString("chatgpt_answer_check_title", "Answer check · page %1\$s", state.pageLabel)
+    when {
+        failure != null && failure.needsSignIn -> {
+            SharedChatGptSignInPrompt(
+                title = title,
+                failure = failure,
+                connection = host.connection,
+                onSignIn = host.onSignIn,
+            )
+            if (fillHeight) Spacer(Modifier.weight(1f))
+        }
+        failure != null && state.text.isBlank() -> {
+            SharedChatGptAnswerCheckFailure(
+                title = title,
+                failure = failure,
+                onRetry = host.onRetry,
+            )
+            if (fillHeight) Spacer(Modifier.weight(1f))
+        }
+        else -> {
+            val isBusy = state.isBusy
+            val followUps = state.followUps
+            val resultScroll = rememberScrollState()
+            // Show a new question and follow its answer while the
+            // reader stays near the bottom.
+            LaunchedEffect(followUps.size) {
+                if (followUps.isNotEmpty()) {
+                    withFrameNanos { }
+                    resultScroll.animateScrollTo(resultScroll.maxValue)
+                }
+            }
+            LaunchedEffect(followUps.lastOrNull()?.answer?.length) {
+                if (resultScroll.maxValue - resultScroll.value < 600) {
+                    resultScroll.scrollTo(resultScroll.maxValue)
+                }
+            }
+            SharedMobileAiResultContent(
+                title = title,
+                markdownText = state.text,
+                errorText = null,
+                isLoading = isBusy,
+                cost = null,
+                freeRemaining = null,
+                isCacheHit = false,
+                onRegenerate = if (isBusy) null else host.onRetry,
+                onClear = null,
+                onOpenExternalDictionary = null,
+                isMainTtsActive = isMainTtsActive,
+                ttsBookTitle = bookTitle,
+                ttsChapterTitle = title,
+                showUsageBadge = false,
+                progressMessage = if (state.phase != SharedChatGptAnswerCheckPhase.PREPARING) {
+                    readerString("chatgpt_answer_check_analyzing", "ChatGPT is checking your answers…")
+                } else if (state.pagesToPrepare > 1) {
+                    readerString(
+                        "chatgpt_answer_check_preparing_pages",
+                        "Preparing pages… %1\$d of %2\$d",
+                        state.preparedPages.coerceAtMost(state.pagesToPrepare),
+                        state.pagesToPrepare,
+                    )
+                } else {
+                    readerString("chatgpt_answer_check_preparing", "Preparing the page…")
+                },
+                afterContent = if (followUps.isEmpty()) null else {
+                    { SharedChatGptFollowUpList(followUps) }
+                },
+                scrollState = resultScroll,
+                modifier = Modifier.weight(1f, fill = fillHeight),
+            )
+            if (failure != null) {
+                SharedChatGptNote(chatGptFailureMessage(failure), isError = true)
+            } else if (state.phase == SharedChatGptAnswerCheckPhase.COMPLETED && state.isTruncated) {
+                SharedChatGptNote(
+                    readerString(
+                        "chatgpt_answer_check_truncated",
+                        "ChatGPT stopped before finishing; the feedback may be incomplete.",
+                    ),
+                    isError = false,
+                )
+            }
+            // Shown while the check runs too, so the question can be typed
+            // ahead; it sends once the check is done.
+            if (state.phase == SharedChatGptAnswerCheckPhase.COMPLETED || isBusy) {
+                SharedChatGptFollowUpInput(
+                    enabled = state.canAskFollowUp,
+                    onAsk = host.onAskFollowUp,
+                )
+            }
         }
     }
 }
