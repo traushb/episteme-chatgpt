@@ -215,6 +215,13 @@ jobs:
             echo "::group::Errors"
             grep -n -E "error:|^e: |FAILURE:|What went wrong|Exception|\*\* BUILD FAILED" build/xcodebuild.log | head -n 200 || true
             echo "::endgroup::"
+            # The lines before the first error name the file and command behind it.
+            first_error="$(grep -n -m 1 -E "error:|^e: " build/xcodebuild.log | cut -d: -f1 || true)"
+            if [ -n "$first_error" ]; then
+              echo "::group::Before the first error"
+              sed -n "$(( first_error > 60 ? first_error - 60 : 1 )),${first_error}p" build/xcodebuild.log
+              echo "::endgroup::"
+            fi
             tail -n 250 build/xcodebuild.log
             exit 1
           fi

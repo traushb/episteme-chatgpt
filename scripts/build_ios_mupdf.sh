@@ -36,7 +36,12 @@ deployment_flag="-miphoneos-version-min=16.0"
 if [ "$sdk_name" = "iphonesimulator" ]; then
   deployment_flag="-mios-simulator-version-min=16.0"
 fi
-compiler="$(xcrun --sdk "$sdk_name" --find clang) -arch $arch_name -isysroot $sdk_path $deployment_flag"
+target_flags="-arch $arch_name -isysroot $sdk_path $deployment_flag"
+compiler="$(xcrun --sdk "$sdk_name" --find clang) $target_flags"
+# MuPDF always compiles its two C++ files (OCR and barcodes, empty when those
+# are off). Make's default c++ would build them for the Mac, and inside Xcode
+# against the iPhoneOS SDK, which only knows arm.
+cxx_compiler="$(xcrun --sdk "$sdk_name" --find clang++) $target_flags"
 build_directory="$output_directory/build"
 
 rm -rf "$output_directory"
@@ -68,6 +73,7 @@ make -C "$source_directory" -j"$(sysctl -n hw.ncpu)" libs \
   build=release \
   OUT="$build_directory" \
   CC="$compiler" \
+  CXX="$cxx_compiler" \
   AR="$(xcrun --sdk "$sdk_name" --find ar)" \
   RANLIB="$(xcrun --sdk "$sdk_name" --find ranlib)" \
   XCFLAGS="-fPIC -I$shim_directory -DFZ_ENABLE_CBZ=0 -DFZ_ENABLE_IMG=0" \
@@ -89,7 +95,7 @@ $compiler -r -nostdlib \
   "$build_directory/libmupdf-third.a"
 
 # MuPDF must be inside the object, not left for the app link to find.
-missing="$(xcrun --sdk "$sdk_name" nm -u "$build_directory/readermupdf.o" | grep -E '^_(fz|pdf)_' || true)"
+missing="$(xcrun --sdk "$sdk_name" nm -u "$build_directory/readermupdf.o" | awk '{ print $NF }' | grep -E '^_(fz|pdf)_' || true)"
 if [ -n "$missing" ]; then
   echo "The prelinked MuPDF object still needs:" >&2
   printf '%s\n' "$missing" | head -n 20 >&2
