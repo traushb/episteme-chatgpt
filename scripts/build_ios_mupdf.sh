@@ -42,6 +42,24 @@ build_directory="$output_directory/build"
 rm -rf "$output_directory"
 mkdir -p "$build_directory"
 
+# MuPDF includes <sys/random.h> on Apple platforms for getentropy(), but the
+# iOS SDK has no such header. Its only use is seeding MuPDF's stream cipher;
+# arc4random_buf() is the platform's own secure source.
+shim_directory="$build_directory/include-shim"
+mkdir -p "$shim_directory/sys"
+cat > "$shim_directory/sys/random.h" <<'SHIM'
+#ifndef READER_MUPDF_SYS_RANDOM_H
+#define READER_MUPDF_SYS_RANDOM_H
+#include <stdlib.h>
+#define getentropy reader_mupdf_getentropy
+static inline int reader_mupdf_getentropy(void *buffer, size_t length)
+{
+    arc4random_buf(buffer, length);
+    return 0;
+}
+#endif
+SHIM
+
 # Only the PDF interpreter and the rasterizer: no JavaScript, HTML/EPUB, XPS,
 # SVG, CBZ or image documents, and no CJK or Noto fallback fonts (about 50 MB).
 # The 14 standard PDF fonts stay built in.
@@ -52,7 +70,7 @@ make -C "$source_directory" -j"$(sysctl -n hw.ncpu)" libs \
   CC="$compiler" \
   AR="$(xcrun --sdk "$sdk_name" --find ar)" \
   RANLIB="$(xcrun --sdk "$sdk_name" --find ranlib)" \
-  XCFLAGS="-fPIC -DFZ_ENABLE_CBZ=0 -DFZ_ENABLE_IMG=0" \
+  XCFLAGS="-fPIC -I$shim_directory -DFZ_ENABLE_CBZ=0 -DFZ_ENABLE_IMG=0" \
   html=no mujs=no brotli=no extract=no xps=no svg=no tofu=yes tofu_cjk=yes barcode=no \
   HAVE_X11=no HAVE_GLUT=no HAVE_CURL=no HAVE_LIBCRYPTO=no
 
